@@ -87,19 +87,19 @@ y_pred = K_cross @ alpha
 ### Infinite-width GP prior (NNGP)
 
 For a deep network with i.i.d. Gaussian parameters at initialization, the pre-activations converge (layer-wise) to a **Gaussian process** with covariance determined by a **recursion**:
-\[
+$$
 K^{(\ell)}(x,x') \;=\; \sigma_b^2 \;+\; \sigma_w^2\, \mathbb{E}_{(u,v)\sim \mathcal{N}(0, \Sigma^{(\ell-1)})}\!\big[\phi(u)\phi(v)\big],
-\]
-where \(\Sigma^{(\ell-1)}\) has entries \(K^{(\ell-1)}(x,x)\), \(K^{(\ell-1)}(x',x')\), and \(K^{(\ell-1)}(x,x')\).  
-**LaTeX:** `$$ K^{(\ell)}(x,x') = \sigma_b^2 + \sigma_w^2\, \mathbb{E}_{(u,v)\sim \mathcal{N}(0, \Sigma^{(\ell-1)})}[\phi(u)\phi(v)] $$`  
+$$
+where $\Sigma^{(\ell-1)}\) has entries \(K^{(\ell-1)}(x,x)\), \(K^{(\ell-1)}(x',x')\), and \(K^{(\ell-1)}(x,x')$.  
+**LaTeX:** $$ K^{(\ell)}(x,x') = \sigma_b^2 + \sigma_w^2\, \mathbb{E}_{(u,v)\sim \mathcal{N}(0, \Sigma^{(\ell-1)})}[\phi(u)\phi(v)] $$  
 (See Lee et al., **ICLR 2018**, Sec. 2.3, Eqs. (4)–(6).)
 
 ### NTK training dynamics (gradient flow)
 
 For squared loss and infinitesimal step size, in the infinite-width limit the network function evolves via **kernel gradient flow**:
-\[
+$$
 \partial_t f_t(x) \;=\; - \int K_{\text{NTK}}(x,x')\big(f_t(x')-y(x')\big)\,d\mu(x').
-\]
+$$
 On a finite dataset this is \(\dot{\mathbf{f}}_t = -\mathbf{K}_{\text{NTK}}(\mathbf{f}_t-\mathbf{y})\), yielding exponential convergence along the kernel eigenmodes.  
 **LaTeX:** `$$ \partial_t f_t(x) = - \int K_{\mathrm{NTK}}(x,x')\big(f_t(x')-y(x')\big)\, d\mu(x') $$`  
 (See Jacot et al., **NeurIPS 2018**, Sec. 4; also discussion around lines 519–533.)
