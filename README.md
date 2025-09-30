@@ -227,5 +227,5 @@ And cite the foundational works you rely on (NTK/NNGP/library) as listed above.
 
 **Acknowledgments.** This project stands on the shoulders of Neural Tangents and the NTK/NNGP literature—thanks to the original authors and community.
 
-[**Neural Tangents (archived repository)**] and documentation remain invaluable references for behavior, design, and examples.
+**Neural Tangents (https://github.com/google/neural-tangents)** and documentation remain invaluable references for behavior, design, and examples.
 
