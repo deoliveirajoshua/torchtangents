@@ -87,11 +87,9 @@ y_pred = K_cross @ alpha
 ### Infinite-width GP prior (NNGP)
 
 For a deep network with i.i.d. Gaussian parameters at initialization, the pre-activations converge (layer-wise) to a **Gaussian process** with covariance determined by a **recursion**:
-$$
-K^{(\ell)}(x,x') \;=\; \sigma_b^2 \;+\; \sigma_w^2\, \mathbb{E}_{(u,v)\sim \mathcal{N}(0, \Sigma^{(\ell-1)})}\!\big[\phi(u)\phi(v)\big],
-$$
+$$K^{(\ell)}(x,x') \;=\; \sigma_b^2 \;+\; \sigma_w^2\, \mathbb{E}_{(u,v)\sim \mathcal{N}(0, \Sigma^{(\ell-1)})}\!\big[\phi(u)\phi(v)\big]$$
 where $\Sigma^{(\ell-1)}\) has entries \(K^{(\ell-1)}(x,x)\), \(K^{(\ell-1)}(x',x')\), and \(K^{(\ell-1)}(x,x')$.  
-**LaTeX:** $$ K^{(\ell)}(x,x') = \sigma_b^2 + \sigma_w^2\, \mathbb{E}_{(u,v)\sim \mathcal{N}(0, \Sigma^{(\ell-1)})}[\phi(u)\phi(v)] $$  
+**LaTeX:** $$K^{(\ell)}(x,x') = \sigma_b^2 + \sigma_w^2\, \mathbb{E}_{(u,v)\sim \mathcal{N}(0, \Sigma^{(\ell-1)})}[\phi(u)\phi(v)]$$  
 (See Lee et al., **ICLR 2018**, Sec. 2.3, Eqs. (4)–(6).)
 
 ### NTK training dynamics (gradient flow)
