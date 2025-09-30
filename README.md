@@ -22,7 +22,7 @@ _**Infinite-width neural networks and NTKs, now natively in PyTorch.**_
 ```bash
 pip install torchtangents        # from PyPI (preferred)
 # or
-pip install git+https://github.com/<org>/torchtangents.git
+pip install git+https://github.com/deoliveirajoshua/torchtangents.git
 ```
 
 **Requirements.** Python ≥ 3.9, PyTorch ≥ 2.2.
@@ -87,19 +87,22 @@ y_pred = K_cross @ alpha
 ### Infinite-width GP prior (NNGP)
 
 For a deep network with i.i.d. Gaussian parameters at initialization, the pre-activations converge (layer-wise) to a **Gaussian process** with covariance determined by a **recursion**:
-$$K^{(\ell)}(x,x') \;=\; \sigma_b^2 \;+\; \sigma_w^2\, \mathbb{E}_{(u,v)\sim \mathcal{N}(0, \Sigma^{(\ell-1)})}\!\big[\phi(u)\phi(v)\big]$$
-where $\Sigma^{(\ell-1)}\) has entries \(K^{(\ell-1)}(x,x)\), \(K^{(\ell-1)}(x',x')\), and \(K^{(\ell-1)}(x,x')$.  
-**LaTeX:** $$K^{(\ell)}(x,x') = \sigma_b^2 + \sigma_w^2\, \mathbb{E}_{(u,v)\sim \mathcal{N}(0, \Sigma^{(\ell-1)})}[\phi(u)\phi(v)]$$  
+
+```math
+K^{(\ell)}(x,x^\prime)=\sigma_b^2+\sigma_w^2 \mathbb{E}_{(u,v)\sim \mathcal{N}(0,\Sigma^{(\ell-1)})}[\phi(u)\phi(v)]
+```
+where $`\Sigma^{(\ell-1)}`$ has entries $`K^{(\ell-1)}(x,x)`$, $`K^{(\ell-1)}(x^\prime,x^\prime)`$, and $`K^{(\ell-1)}(x,x^\prime)`$.  
 (See Lee et al., **ICLR 2018**, Sec. 2.3, Eqs. (4)–(6).)
 
 ### NTK training dynamics (gradient flow)
 
 For squared loss and infinitesimal step size, in the infinite-width limit the network function evolves via **kernel gradient flow**:
-$$
-\partial_t f_t(x) \;=\; - \int K_{\text{NTK}}(x,x')\big(f_t(x')-y(x')\big)\,d\mu(x').
-$$
-On a finite dataset this is \(\dot{\mathbf{f}}_t = -\mathbf{K}_{\text{NTK}}(\mathbf{f}_t-\mathbf{y})\), yielding exponential convergence along the kernel eigenmodes.  
-**LaTeX:** `$$ \partial_t f_t(x) = - \int K_{\mathrm{NTK}}(x,x')\big(f_t(x')-y(x')\big)\, d\mu(x') $$`  
+
+```math
+\partial_t f_t(x) = - \int K_{\text{NTK}}(x,x')\big(f_t(x')-y(x')\big)\,d\mu(x').
+```
+
+On a finite dataset this is $`\dot{\mathbf{f}}_t = -\mathbf{K}_{\text{NTK}}(\mathbf{f}_t-\mathbf{y})`$, yielding exponential convergence along the kernel eigenmodes.  
 (See Jacot et al., **NeurIPS 2018**, Sec. 4; also discussion around lines 519–533.)
 
 > Background and library context: Novak et al., **“Fast and Easy Infinite Neural Networks in Python”** (ICLR 2020) introduced the Neural Tangents software that `torchtangents` ports to PyTorch.
@@ -205,9 +208,9 @@ If you use `torchtangents` in academic work, please cite:
 ```bibtex
 @software{torchtangents2025,
   title        = {torchtangents: Infinite-width neural networks and NTKs in PyTorch},
-  author       = {Your Name and Contributors},
+  author       = {Joshua DeOliveira},
   year         = {2025},
-  url          = {https://github.com/<org>/torchtangents},
+  url          = {https://github.com/deoliveirajoshua/torchtangents},
   note         = {Fork of Neural Tangents (archived May 6, 2025)}
 }
 ```
