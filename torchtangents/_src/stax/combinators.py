@@ -1,6 +1,6 @@
-# Copyright 2019 Google LLC
+# Copyright 2025
 #
-# Licensed under the Apache License, Version 2.0 (the "License');
+# Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
@@ -12,257 +12,226 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Layer combinators."""
+"""Layer combinators (PyTorch port)."""
+
+from __future__ import annotations
 
 import operator as op
-from typing import Any, Callable
+from typing import Any, Callable, List, Tuple
 import warnings
 
 import frozendict
-import jax
-from jax import lax
-from jax import random
-import jax.example_libraries.stax as ostax
+import torch
 
 from ..utils.kernel import Kernel
-from ..utils.typing import InternalLayer
-from ..utils.typing import Layer
-from ..utils.typing import LayerKernelFn
-from ..utils.typing import NTTree
-from ..utils.typing import NTTrees
-from ..utils.typing import Shapes
-from .requirements import Diagonal
-from .requirements import get_req
-from .requirements import layer
-from .requirements import requires
+from ..utils.typing import InternalLayer, Layer, LayerKernelFn, NTTree, NTTrees, Shapes
+from .requirements import Diagonal, get_req, layer, requires
 
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
+
+def _tree_map(fn: Callable[..., Any], *trees, is_leaf=None):
+    if not trees:
+        return None
+    ref = trees[0]
+    leaf = is_leaf(ref) if is_leaf is not None else (type(ref) not in (list, tuple))
+    if leaf:
+        return fn(*trees)
+    t = type(ref)
+    return t(_tree_map(fn, *(xs[i] for xs in trees), is_leaf=is_leaf) for i in range(len(ref)))
+
+def _tree_zip(*trees):
+    ref = trees[0]
+    if type(ref) in (list, tuple):
+        t = type(ref)
+        return t(_tree_zip(*(xs[i] for xs in trees)) for i in range(len(ref)))
+    return trees
+
+def _split_generator(gen: torch.Generator) -> Tuple[torch.Generator, torch.Generator]:
+    """Deterministically split a torch.Generator into (gen, new_child)."""
+    # Draw a new seed from `gen` and create a child generator.
+    # This keeps things purely PyTorch and compile-friendly.
+    seed = int(torch.randint(0, 2**63 - 1, (1,), generator=gen).item())
+    child = torch.Generator(device='cpu')
+    child.manual_seed(seed)
+    # return original for further use (already advanced), and the child
+    return gen, child
+
+# -----------------------------------------------------------------------------
+# serial
+# -----------------------------------------------------------------------------
 
 @layer
 def serial(*layers: Layer) -> InternalLayer:
-  """Combinator for composing layers in serial.
+    """Compose layers in serial (PyTorch version)."""
 
-  Based on :obj:`jax.example_libraries.stax.serial`.
+    init_fns, apply_fns, kernel_fns = zip(*layers)
 
-  Args:
-    *layers:
-      a sequence of layers, each an `(init_fn, apply_fn, kernel_fn)` triple.
+    def init_fn(rng: torch.Generator, input_shape: Shapes):
+        """Initialize each layer in turn; params is a list with same structure."""
+        params: List[Any] = []
+        cur_shape = input_shape
+        cur_rng = rng
+        for f in init_fns:
+            cur_rng, child = _split_generator(cur_rng)
+            out_shape, p = f(child, cur_shape)
+            params.append(p)
+            cur_shape = out_shape
+        return cur_shape, params
 
-  See Also:
-    :obj:`~neural_tangents.stax.repeat` for compiled repeated composition.
+    def apply_fn(params, inputs, **kwargs):
+        """Apply each layer sequentially."""
+        x = inputs
+        for f, p in zip(apply_fns, params):
+            x = f(p, x, **kwargs)
+        return x
 
-  Returns:
-    A new layer, meaning an `(init_fn, apply_fn, kernel_fn)` triple,
-    representing the serial composition of the given sequence of layers.
-  """
-  init_fns, apply_fns, kernel_fns = zip(*layers)
-  init_fn, apply_fn = ostax.serial(*zip(init_fns, apply_fns))
+    @requires(**_get_input_req_attr(kernel_fns, fold=op.rshift))
+    def kernel_fn(k: NTTree[Kernel], **kwargs) -> NTTree[Kernel]:
+        for f in kernel_fns:
+            k = f(k, **kwargs)
+        return k
 
-  @requires(**_get_input_req_attr(kernel_fns, fold=op.rshift))
-  def kernel_fn(k: NTTree[Kernel], **kwargs) -> NTTree[Kernel]:
-    # TODO(xlc): if we drop `x1_is_x2` and use `rng` instead, need split key
-    # inside kernel functions here and parallel below.
-    for f in kernel_fns:
-      k = f(k, **kwargs)
-    return k
+    return init_fn, apply_fn, kernel_fn
 
-  return init_fn, apply_fn, kernel_fn
-
+# -----------------------------------------------------------------------------
+# repeat
+# -----------------------------------------------------------------------------
 
 @layer
 def repeat(layer: Layer, n: int) -> InternalLayer:
-  """Compose `layer` in a compiled loop `n` times.
+    """Compose `layer` in a compiled-friendly Python loop `n` times.
 
-  Equivalent to `serial(*([layer] * n))`, but allows faster compilation time
-  for large `n` (but same runtime).
+    Assumes the layer keeps activation shape and Kernel metadata unchanged.
+    """
 
-  .. warning::
-    `apply_fn` of the `layer` is assumed to keep the activation (`x`) shape
-    unchanged.
+    init_f, apply_f, kernel_f = layer
 
-  .. warning::
-    `kernel_fn` of the `layer` is assumed to keep the
-    :class:`~neural_tangents.Kernel` metadata unchanged. This is most notably
-    not satisfied in :obj:`~neural_tangents.stax.Conv` and other convolutional
-    layers which flip the `is_reversed` attribute with each application. A
-    workaround is to either use `serial(*([layer] * n))`, or to use
-    `repeat(serial(layer, layer), n // 2)` instead of `repeat(layer, n)` for an
-    even `n`, i.e. to use two (or, generally, any even number of) convolutions
-    per `layer` instead of one (or, generally, any odd number), such that
-    `layer` does not alter the `is_reversed` attribute. Similar caution should
-    be applied to other :class:`~neural_tangents.Kernel` attributes.
+    def init_fn_repeat(rng: torch.Generator, input_shape: Shapes):
+        # Check shape invariance and build params for n copies.
+        out_shape, _ = init_f(rng, input_shape)
+        if out_shape != input_shape:
+            raise ValueError(
+                f'`init_fn` produces a different output shape {out_shape} than the '
+                f'input shape {input_shape}. Please use `serial(*([layer] * n))`.'
+            )
 
-  See Also:
-    `RepeatTest` in `tests/stax/combinators_test.py` for examples and
-    :obj:`~neural_tangents.stax.serial` for unrolled composition.
+        params_list: List[Any] = []
+        cur_rng = rng
+        for _ in range(n):
+            cur_rng, child = _split_generator(cur_rng)
+            out_shape_i, p = init_f(child, input_shape)
+            if out_shape_i != input_shape:
+                raise ValueError(
+                    'Intermediate layer in `repeat` changed shape; use `serial`.'
+                )
+            params_list.append(p)
+        return input_shape, params_list
 
-  Example:
-    >>> from neural_tangents import stax
-    >>> #
-    >>> layer = stax.serial(stax.Dense(128), stax.Relu())
-    >>> depth = 100
-    >>> #
-    >>> # Unrolled loop:
-    >>> nn_unrolled = stax.serial(*([layer] * depth))
-    >>> #
-    >>> # Compiled loop:
-    >>> nn_compiled = stax.repeat(layer, depth)
-    >>> # `nn_unrolled` and `nn_compiled` perform the same computation, but
-    >>> # `nn_compiled` compiles faster and with smaller memory footprint.
+    def apply_fn_repeat(params, inputs, **kwargs):
+        x = inputs
+        for p in params:
+            x = apply_f(p, x, **kwargs)
+        return x
 
-  Args:
-    layer:
-      layer to be repeated. Outputs must have the same shape and other metadata
-      as inputs.
+    @requires(**get_req(kernel_f))
+    def kernel_fn_repeat(k: NTTree[Kernel], **kwargs) -> NTTree[Kernel]:
+        if n <= 0:
+            return k
+        for _ in range(n):
+            k = kernel_f(k, **kwargs)
+        return k
 
-    n:
-      number of times to repeat a layer (depth).
+    return init_fn_repeat, apply_fn_repeat, kernel_fn_repeat
 
-  Returns:
-    A new layer, meaning an `(init_fn, apply_fn, kernel_fn)` triple,
-    representing the repeated composition of `layer` `n` times.
-  """
-  init_fn, apply_fn, kernel_fn = layer
-
-  def init_fn_repeat(rng, input_shape):
-    out_shape, _ = init_fn(rng, input_shape)
-    if out_shape != input_shape:
-      raise ValueError(
-          f'`init_fn` produces a different output shape {out_shape} than the '
-          f'input shape {input_shape}. Please use the `serial(*([layer] * n)`) '
-          f'construction in this setting.'
-      )
-
-    def init_fn_scan(rng, params):
-      rng, layer_rng = random.split(rng)
-      out_shape, params = init_fn(layer_rng, input_shape)
-      return rng, params
-
-    _, params = lax.scan(init_fn_scan, rng, None, n)
-    return out_shape, params
-
-  def apply_fn_repeat(params, inputs, **kwargs):
-    def apply_fn_scan(x, params):
-      return apply_fn(params, x, **kwargs), None
-
-    outputs, _ = lax.scan(apply_fn_scan, inputs, params, n)
-    return outputs
-
-  @requires(**get_req(kernel_fn))
-  def kernel_fn_repeat(k: NTTree[Kernel], **kwargs) -> NTTree[Kernel]:
-    if n > 0:
-      k = kernel_fn(k, **kwargs)
-
-      def kernel_fn_scan(k, _):
-        k = kernel_fn(k, **kwargs)
-        return k, None
-
-      k, _ = lax.scan(kernel_fn_scan, k, None, n - 1)
-
-    return k
-
-  return init_fn_repeat, apply_fn_repeat, kernel_fn_repeat
-
+# -----------------------------------------------------------------------------
+# parallel
+# -----------------------------------------------------------------------------
 
 @layer
 def parallel(*layers: Layer) -> InternalLayer:
-  """Combinator for composing layers in parallel.
+    """Compose layers in parallel (zip structure in, zip structure out)."""
 
-  The layer resulting from this combinator is often used with the
-  :obj:`~neural_tangents.stax.FanOut`, :obj:`~neural_tangents.stax.FanInSum`,
-  and :obj:`~neural_tangents.stax.FanInConcat` layers. Based on
-  :obj:`jax.example_libraries.stax.parallel`.
+    init_fns, apply_fns, kernel_fns = zip(*layers)
 
-  Args:
-    *layers:
-      a sequence of layers, each with a `(init_fn, apply_fn, kernel_fn)` triple.
+    def init_fn(rng: torch.Generator, input_shape: Shapes):
+        # Preserve the container type of `input_shape` (list/tuple)
+        if not isinstance(input_shape, (list, tuple)):
+            raise TypeError('`parallel` expects a sequence of input shapes.')
+        shapes_out = []
+        params_out = []
+        cur_rng = rng
+        for f, s in zip(init_fns, input_shape):
+            cur_rng, child = _split_generator(cur_rng)
+            so, p = f(child, s)
+            shapes_out.append(so)
+            params_out.append(p)
+        t = type(input_shape)
+        return t(shapes_out), t(params_out)
 
-  Returns:
-    A new layer, meaning an `(init_fn, apply_fn, kernel_fn)` triples,
-    representing the parallel composition of the given sequence of layers. In
-    particular, the returned layer takes a sequence of inputs and returns a
-    sequence of outputs with the same length as the argument `layers`.
-  """
-  init_fns, apply_fns, kernel_fns = zip(*layers)
-  init_fn_stax, apply_fn_stax = ostax.parallel(*zip(init_fns, apply_fns))
+    def apply_fn(params, inputs, **kwargs):
+        if not isinstance(inputs, (list, tuple)):
+            raise TypeError('`parallel` expects a sequence of inputs.')
+        outs = [f(p, x, **kwargs) for f, p, x in zip(apply_fns, params, inputs)]
+        return type(inputs)(outs)
 
-  def init_fn(rng: jax.Array, input_shape: Shapes):
-    return type(input_shape)(init_fn_stax(rng, input_shape))
+    @requires(**_get_input_req_attr(kernel_fns, fold=op.and_))
+    def kernel_fn(ks: NTTrees[Kernel], **kwargs) -> NTTrees[Kernel]:
+        if not isinstance(ks, (list, tuple)):
+            raise TypeError('`parallel` expects a sequence of Kernels.')
+        outs = [f(k, **kwargs) for k, f in zip(ks, kernel_fns)]
+        return type(ks)(outs)
 
-  def apply_fn(params, inputs, **kwargs):
-    return type(inputs)(apply_fn_stax(params, inputs, **kwargs))
+    return init_fn, apply_fn, kernel_fn
 
-  @requires(**_get_input_req_attr(kernel_fns, fold=op.and_))
-  def kernel_fn(ks: NTTrees[Kernel], **kwargs) -> NTTrees[Kernel]:
-    return type(ks)(f(k, **kwargs) for k, f in zip(ks, kernel_fns))
-
-  return init_fn, apply_fn, kernel_fn
-
-
+# -----------------------------------------------------------------------------
 # INTERNAL UTILITIES
-
+# -----------------------------------------------------------------------------
 
 def _get_input_req_attr(
     kernel_fns: list[LayerKernelFn],
     fold: Callable[[Diagonal, Diagonal], Diagonal]
 ) -> dict[str, Any]:
-  """Gets requirements of the combined layer based on individual requirements.
+    """Combine requirements/allowances across layers (serial or parallel)."""
+    req: dict[str, Any] = {}
 
-  Specifically, gets the requirements / allowances to the inputs to a `serial`
-  or `parallel` sequence of layers based on requirements of each layer, setting
-  requirements / allowances to the most / least demanding among all layers.
+    for f in kernel_fns:
+        req_f = get_req(f, default=frozendict.frozendict())
 
-  Args:
-    kernel_fns:
-      list of `kernel_fn`s fed to the `kernel_fns` (e.g. a list of
-      convolutional layers and nonlinearities to be chained together with the
-      `serial` combinator) or evaluated in parallel (`parallel` combinator).
+        for k, v in req_f.items():
+            if k == 'use_dropout':
+                if k in req and req[k] != v:
+                    raise ValueError('`use_dropout` is a whole-network attribute '
+                                     'and cannot differ across layers.')
+                req[k] = v
 
-    fold:
-      binary associative operator to combine allowances of consecutive
-      individual `kernel_fn`s. Can be only `operator.rshift` (`>>`), i.e.
-      composition (corresponding to `serial`) or `operator.and_`, (`&`), i.e.
-      `AND` (corresponding to `parallel`).
+            elif k in ('batch_axis', 'channel_axis'):
+                if k not in req:
+                    req[k] = v
+                else:
+                    if fold is op.and_:
+                        if k in req and req[k] != v:
+                            if (req[k] >= 0 and v >= 0) or (req[k] < 0 and v < 0):
+                                warnings.warn(
+                                    f'For `kernel_fn`, `{k}` must match in all parallel branches, '
+                                    f'got {req[k]} and {v}. This WILL lead to [silent] errors.'
+                                )
+                            else:
+                                warnings.warn(
+                                    f'Got potentially mismatching `{k}` values in '
+                                    f'parallel branches: {req[k]} and {v}.'
+                                )
+                    elif fold is not op.rshift:
+                        raise ValueError(fold)
 
-  Returns:
-    A `dict` with combined requirements / allowances.
-  """
-  req = {}
+            elif k in ('diagonal_batch', 'diagonal_spatial'):
+                if k in req:
+                    req[k] = fold(req[k], v)
+                else:
+                    req[k] = v
 
-  for f in kernel_fns:
-    req_f = get_req(f, default=frozendict.frozendict())
+            else:
+                raise NotImplementedError(k)
 
-    for k, v in req_f.items():
-      if k == 'use_dropout':
-        if k in req and req[k] != v:
-          raise ValueError('`use_dropout` is a single whole-network attribute '
-                           'and cannot be set to different values.')
-        req[k] = v
-
-      elif k in ('batch_axis', 'channel_axis'):
-        if k not in req:
-          req[k] = v
-        else:
-          if fold is op.and_:
-            if k in req and req[k] != v:
-              if (req[k] >= 0 and v >= 0) or (req[k] < 0 and v < 0):
-                warnings.warn(f'For `kernel_fn`, `{k}` parameters must match in'
-                              f' all parallel branches, got {req[k]} and {v}. '
-                              f'This WILL lead to [silent] errors if '
-                              f'`kernel_fn` is called.')
-              else:
-                warnings.warn(f'Got potentially mismatching `{k}` values in '
-                              f'parallel branches: {req[k]} and {v}.')
-
-          elif fold is not op.rshift:
-            raise ValueError(fold)
-
-      elif k in ('diagonal_batch', 'diagonal_spatial'):
-        if k in req:
-          req[k] = fold(req[k], v)
-        else:
-          req[k] = v
-
-      else:
-        raise NotImplementedError(k)
-
-  return req
+    return req

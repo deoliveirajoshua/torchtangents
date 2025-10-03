@@ -1,1385 +1,948 @@
-# Copyright 2019 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License');
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     https://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# stax_elementwise_torch.py
+# PyTorch port of Neural Tangents elementwise activations + kernel transforms.
+# Compatible with torch.compile (pure-Torch math, no side effects in forward paths).
 
-"""Elementwise nonlinearities / activation functions.
-
-For details, please see "`Fast Neural Kernel Embeddings for General Activations
-<https://arxiv.org/abs/2209.04121>`_".
-"""
-
+from __future__ import annotations
 import functools
 import operator as op
-from typing import Callable, Optional, Sequence
+from typing import Callable, Optional, Sequence, Tuple
 import warnings
+import math
 
-import jax
-from jax import custom_jvp
-from jax import grad
-from jax import numpy as jnp
-from jax import vmap
-from jax.scipy.special import erf
+import torch
 import numpy as np
-import scipy as sp
 
 from ..utils import utils
 from ..utils.kernel import Kernel
-from ..utils.typing import InternalLayer
-from ..utils.typing import LayerKernelFn
-from .requirements import Diagonal
-from .requirements import get_diagonal
-from .requirements import get_diagonal_outer_prods
-from .requirements import layer
-from .requirements import requires
-from .requirements import supports_masking
+from ..utils.typing import InternalLayer, LayerKernelFn  # optional: mirror type names
+from .requirements import (
+    Diagonal,
+    get_diagonal,
+    get_diagonal_outer_prods,
+    layer,
+    requires,
+    supports_masking,
+)
 
+# -----------------------
+# Numerics helpers
+# -----------------------
+
+def _sqrt(x: torch.Tensor, tol: float = 0.0) -> torch.Tensor:
+    # Safe sqrt with clamp; autograd works fine in Torch
+    if tol > 0:
+        return torch.sqrt(torch.clamp(x, min=tol))
+    return torch.sqrt(x)
+
+def _arctan2(x: torch.Tensor, y: torch.Tensor, fill_zero: Optional[float] = None) -> torch.Tensor:
+    if fill_zero is None:
+        return torch.atan2(x, y)
+    return torch.where(
+        (x == 0) & (y == 0),
+        torch.as_tensor(fill_zero, dtype=x.dtype, device=x.device),
+        torch.atan2(x, y),
+    )
+
+def _factorial(n: int) -> int:
+    out = 1
+    for i in range(1, n + 1):
+        out *= i
+    return out
+
+def _double_factorial(n: int) -> int:
+    out = 1
+    for i in range(n, 0, -2):
+        out *= i
+    return out
+
+# A small autodiff helper: derivative wrt `cov12` for elementwise tensor fn
+def _grad_wrt_cov12(
+    fn: Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor],
+    cov12: torch.Tensor,
+    var1: torch.Tensor,
+    var2: torch.Tensor,
+) -> torch.Tensor:
+    cov12_req = cov12.detach().requires_grad_(True)
+    y = fn(cov12_req, var1, var2)
+    # Ensure scalar for autograd
+    (g,) = torch.autograd.grad(y.sum(), cov12_req, retain_graph=False, create_graph=False, allow_unused=False)
+    return g
+
+# Vectorized 2D “vmap” that relies on broadcasted elementwise fn (Torch ops)
+def _vmap_2d(
+    fn: Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor],
+    cov12: torch.Tensor,
+    var1: torch.Tensor,
+    var2: Optional[torch.Tensor],
+    diagonal_batch: bool,
+    diagonal_spatial: bool
+) -> torch.Tensor:
+    """
+    Torch version of the JAX helper. Assumes `fn` supports broadcasted tensors.
+    Shapes/layouts match your utils.make_2d / utils.zip_axes conventions.
+    """
+    batch_ndim = 1 if diagonal_batch else 2
+    start = 2 - batch_ndim
+    cov_end = batch_ndim if diagonal_spatial else cov12.ndim
+    _cov12 = utils.make_2d(cov12, start, cov_end)
+
+    var_end = 1 if diagonal_spatial else var1.ndim
+    var1 = var1.reshape(var1.shape[:start] + (-1,) + var1.shape[var_end:])
+    var2 = var1 if var2 is None else var2.reshape(var2.shape[:start] + (-1,) + var2.shape[var_end:])
+
+    out = fn(_cov12, var1, var2)  # rely on broadcasting
+    out_shape = (
+        cov12.shape[:start] +
+        cov12.shape[start:cov_end:2] +
+        cov12.shape[start + 1:cov_end:2] +
+        cov12.shape[cov_end:]
+    )
+    out = out.reshape(out_shape)
+    out = utils.zip_axes(out, start, cov_end)
+    return out
+
+
+# -----------------------
+# Core elementwise wrapper
+# -----------------------
+
+def _elementwise(
+    fn: Optional[Callable[[torch.Tensor], torch.Tensor]],
+    name: str,
+    kernel_fn: Optional[LayerKernelFn],
+) -> InternalLayer:
+    init_fn = lambda rng, input_shape: (input_shape, ())
+
+    def apply_fn(params, inputs: torch.Tensor, **kwargs):
+        if fn is None:
+            raise NotImplementedError(fn)
+        return fn(inputs)
+
+    @requires(diagonal_spatial=Diagonal())
+    def new_kernel_fn(k: Kernel, **kwargs) -> Kernel:
+        if kernel_fn is None:
+            raise NotImplementedError(kernel_fn)
+        if not k.is_gaussian:
+            raise ValueError(
+                'The input to the activation must be Gaussian; apply a random affine transform before the nonlinearity.'
+            )
+        k2 = kernel_fn(k)
+        return k2.replace(is_gaussian=False)
+
+    init_fn.__name__ = apply_fn.__name__ = new_kernel_fn.__name__ = name
+    return init_fn, apply_fn, new_kernel_fn
+
+
+# -----------------------
+# Activations + kernel transforms
+# -----------------------
 
 @layer
 @supports_masking(remask_kernel=True)
-def Erf(
-    a: float = 1.,
-    b: float = 1.,
-    c: float = 0.
-) -> InternalLayer:
-  """Affine transform of `Erf` nonlinearity, i.e. `a * Erf(b * x) + c`.
+def Erf(a: float = 1., b: float = 1., c: float = 0.) -> InternalLayer:
+    """a * erf(b * x) + c"""
+    def fn(x: torch.Tensor) -> torch.Tensor:
+        return a * torch.special.erf(b * x) + c
 
-  Args:
-    a: output scale.
-    b: input scale.
-    c: output shift.
+    def kernel_fn(k: Kernel) -> Kernel:
+        k = k * b
 
-  Returns:
-    `(init_fn, apply_fn, kernel_fn)`.
-  """
-  def fn(x):
-    return a * erf(b * x) + c
+        cov1, nngp, cov2, ntk = k.cov1, k.nngp, k.cov2, k.ntk
+        cov1_denom = 1 + 2 * cov1
+        cov2_denom = None if cov2 is None else 1 + 2 * cov2
 
-  def kernel_fn(k: Kernel) -> Kernel:
-    k *= b
+        prod11, prod12, prod22 = get_diagonal_outer_prods(
+            cov1_denom, cov2_denom, k.diagonal_batch, k.diagonal_spatial, op.mul
+        )
 
-    cov1, nngp, cov2, ntk = k.cov1, k.nngp, k.cov2, k.ntk
+        factor = 2.0 / math.pi
 
-    cov1_denom = 1 + 2 * cov1
-    cov2_denom = None if cov2 is None else 1 + 2 * cov2
+        def nngp_ntk_fn(nngp: torch.Tensor, prod: torch.Tensor, ntk: Optional[torch.Tensor] = None):
+            square_root = _sqrt(prod - 4 * nngp**2)
+            new_nngp = factor * torch.atan2(2 * nngp, square_root)
+            if ntk is not None:
+                dot_sigma = 2 * factor / square_root
+                ntk = ntk * dot_sigma
+            return new_nngp, ntk
 
-    prod11, prod12, prod22 = get_diagonal_outer_prods(cov1_denom,
-                                                      cov2_denom,
-                                                      k.diagonal_batch,
-                                                      k.diagonal_spatial,
-                                                      op.mul)
+        def nngp_fn_diag(v: torch.Tensor) -> torch.Tensor:
+            return factor * torch.atan2(v, torch.sqrt(v + 0.25))
 
-    factor = 2 / jnp.pi
+        nngp, ntk = nngp_ntk_fn(nngp, prod12, ntk)
 
-    def nngp_ntk_fn(
-        nngp: jnp.ndarray,
-        prod: jnp.ndarray,
-        ntk: Optional[jnp.ndarray] = None
-    ) -> tuple[jnp.ndarray, Optional[jnp.ndarray]]:
-      square_root = _sqrt(prod - 4 * nngp**2)
-      nngp = factor * jnp.arctan2(2 * nngp, square_root)
+        if k.diagonal_batch and k.diagonal_spatial:
+            cov1 = nngp_fn_diag(cov1)
+            if cov2 is not None:
+                cov2 = nngp_fn_diag(cov2)
+        else:
+            cov1, _ = nngp_ntk_fn(cov1, prod11, None)
+            if cov2 is not None:
+                cov2, _ = nngp_ntk_fn(cov2, prod22, None)
 
-      if ntk is not None:
-        dot_sigma = 2 * factor / square_root
-        ntk *= dot_sigma
+        k = k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk)
+        return a * k + c
 
-      return nngp, ntk
-
-    def nngp_fn_diag(nngp: jnp.ndarray) -> jnp.ndarray:
-      return factor * jnp.arctan2(nngp, jnp.sqrt(nngp + 1. / 4))
-
-    nngp, ntk = nngp_ntk_fn(nngp, prod12, ntk)
-
-    if k.diagonal_batch and k.diagonal_spatial:
-      cov1 = nngp_fn_diag(cov1)
-      if cov2 is not None:
-        cov2 = nngp_fn_diag(cov2)
-    else:
-      cov1, _ = nngp_ntk_fn(cov1, prod11)
-      if cov2 is not None:
-        cov2, _ = nngp_ntk_fn(cov2, prod22)
-
-    k = k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk)
-    return a * k + c
-
-  return _elementwise(fn, f'Erf({a}, {b}, {c})', kernel_fn)
+    return _elementwise(fn, f'Erf({a}, {b}, {c})', kernel_fn)
 
 
 def Sigmoid_like():
-  """A sigmoid like function `f(x) = .5 * erf(x / 2.4020563531719796) + .5`.
-
-  The constant `2.4020563531719796` is chosen so that the squared loss between
-  this function and the ground truth sigmoid is minimized on the interval
-  `[-5, 5]`; see
-  https://gist.github.com/SiuMath/679e8bb4bce13d5f2383a27eca649575.
-
-  Returns:
-    `(init_fn, apply_fn, kernel_fn)`.
-  """
-  return Erf(a=0.5, b=1/2.4020563531719796, c=0.5)
+    return Erf(a=0.5, b=1/2.4020563531719796, c=0.5)
 
 
 @layer
 @supports_masking(remask_kernel=False)
 def Gabor() -> InternalLayer:
-  """Gabor function `exp(-x^2) * sin(x)`.
+    def fn(x: torch.Tensor) -> torch.Tensor:
+        return torch.exp(-x * x) * torch.sin(x)
 
-  Returns:
-    `(init_fn, apply_fn, kernel_fn)`.
-  """
+    def kernel_fn(k: Kernel) -> Kernel:
+        cov1, nngp, cov2, ntk = k.cov1, k.nngp, k.cov2, k.ntk
+        prod11, prod12, prod22 = get_diagonal_outer_prods(cov1, cov2, k.diagonal_batch, k.diagonal_spatial, op.mul)
+        sum11, sum12, sum22 = get_diagonal_outer_prods(cov1, cov2, k.diagonal_batch, k.diagonal_spatial, op.add)
 
-  def fn(x):
-    return jnp.exp(-x ** 2) * jnp.sin(x)
+        def nngp_ntk_fn(nngp, prod, sum_, ntk=None):
+            diff = 4 * (prod - nngp**2)
+            denom = 2 * sum_ + diff + 1
+            num = sum_ + diff + 2 * nngp
+            exp_left = torch.exp(-num / (2 * denom))
+            exp_right = torch.exp(2 * nngp / denom)
 
-  def kernel_fn(k: Kernel) -> Kernel:
-    cov1, nngp, cov2, ntk = k.cov1, k.nngp, k.cov2, k.ntk
+            if ntk is not None:
+                shared_term = 1 + 2 * sum_ + 4 * (nngp**2 + prod)
+                diff_term = 4 * nngp * (diff + 3 * sum_ + 2)
+                lhs = shared_term - diff_term
+                rhs = shared_term + diff_term
+                t_dot = exp_left * (lhs + exp_right * rhs) / denom.pow(2.5)
+                ntk = ntk * (t_dot / 2)
+            nngp = exp_left * (exp_right - 1) / (2 * _sqrt(denom))
+            return nngp, ntk
 
-    prod11, prod12, prod22 = get_diagonal_outer_prods(
-        cov1, cov2, k.diagonal_batch, k.diagonal_spatial, op.mul)
+        def nngp_fn_diag(v):
+            denom = 1 + 4 * v
+            return (1 - torch.exp(-2 * v / denom)) / (2 * _sqrt(denom))
 
-    sum11, sum12, sum22 = get_diagonal_outer_prods(
-        cov1, cov2, k.diagonal_batch, k.diagonal_spatial, op.add)
+        nngp, ntk = nngp_ntk_fn(nngp, prod12, sum12, ntk)
 
-    def nngp_ntk_fn(
-        nngp: jnp.ndarray,
-        prod: jnp.ndarray,
-        sum_: jnp.ndarray,
-        ntk: Optional[jnp.ndarray] = None
-    ) -> tuple[jnp.ndarray, Optional[jnp.ndarray]]:
-      diff = 4 * (prod - nngp**2)
-      denom = 2 * sum_ + diff + 1
-      num = sum_ + diff + 2 * nngp
-      exp_left = jnp.exp(-num / (2 * denom))
-      exp_right = jnp.exp(2 * nngp / denom)
+        if k.diagonal_batch and k.diagonal_spatial:
+            cov1 = nngp_fn_diag(cov1)
+            cov2 = None if cov2 is None else nngp_fn_diag(cov2)
+        else:
+            cov1, _ = nngp_ntk_fn(cov1, prod11, sum11, None)
+            if cov2 is not None:
+                cov2, _ = nngp_ntk_fn(cov2, prod22, sum22, None)
 
-      if ntk is not None:
-        shared_term = 1 + 2 * sum_ + 4 * (nngp**2 + prod)
-        diff_term = 4 * nngp * (diff + 3 * sum_ + 2)
-        lhs = shared_term - diff_term
-        rhs = shared_term + diff_term
-        t_dot = exp_left * (lhs + exp_right * rhs) / denom**(5. / 2)
-        ntk *= t_dot / 2
+        return k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk)
 
-      nngp = exp_left * (exp_right - 1) / (2 * _sqrt(denom))
-      return nngp, ntk
-
-    def nngp_fn_diag(nngp: jnp.ndarray) -> jnp.ndarray:
-      denom = 1 + 4 * nngp
-      return (1 - jnp.exp(-2 * nngp / denom)) / (2 * _sqrt(denom))
-
-    nngp, ntk = nngp_ntk_fn(nngp, prod12, sum12, ntk)
-
-    if k.diagonal_batch and k.diagonal_spatial:
-      cov1 = nngp_fn_diag(cov1)
-      if cov2 is not None:
-        cov2 = nngp_fn_diag(cov2)
-    else:
-      cov1, _ = nngp_ntk_fn(cov1, prod11, sum11)
-      if cov2 is not None:
-        cov2, _ = nngp_ntk_fn(cov2, prod22, sum22)
-
-    return k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk)
-
-  return _elementwise(fn, 'Gabor', kernel_fn)
+    return _elementwise(fn, 'Gabor', kernel_fn)
 
 
 @layer
 @supports_masking(remask_kernel=False)
 def Gelu(approximate: bool = False) -> InternalLayer:
-  """Gelu function.
+    def fn(x: torch.Tensor) -> torch.Tensor:
+        return torch.nn.functional.gelu(x, approximate='tanh' if approximate else 'none')
 
-  Args:
-    approximate:
-      only relevant for finite-width network, `apply_fn`. If `True`, computes
-      an approximation via `tanh`, see "`Gaussian Error Linear Units (GELUs)
-      <https://arxiv.org/abs/1606.08415>`_" and :obj:`jax.nn.gelu` for details.
+    def kernel_fn(k: Kernel) -> Kernel:
+        cov1, nngp, cov2, ntk = k.cov1, k.nngp, k.cov2, k.ntk
+        cov1_plus_1 = cov1 + 1
+        cov2_plus_1 = None if cov2 is None else cov2 + 1
 
-  Returns:
-    `(init_fn, apply_fn, kernel_fn)`.
-  """
-  def fn(x):
-    return jax.nn.gelu(x, approximate=approximate)
+        prod11_p1, prod12_p1, prod22_p1 = get_diagonal_outer_prods(cov1_plus_1, cov2_plus_1, k.diagonal_batch, k.diagonal_spatial, op.mul)
+        prod11, prod12, prod22 = get_diagonal_outer_prods(cov1, cov2, k.diagonal_batch, k.diagonal_spatial, op.mul)
 
-  def kernel_fn(k: Kernel) -> Kernel:
-    """Compute kernels after a `Gelu` layer.
+        def nngp_ntk_fn(nngp, prod, prod_plus_1, ntk=None):
+            delta_sq = prod_plus_1 - nngp**2
+            delta = _sqrt(delta_sq, 1e-30)
+            angles = torch.atan2(nngp, delta)
+            new_nngp = (nngp**2 + prod * delta_sq) / (prod_plus_1 * delta)
+            new_nngp += nngp * angles
+            new_nngp /= (2 * math.pi)
+            new_nngp += 0.25 * nngp
 
-    For NNGP see "`Avoiding Kernel Fixed Points: Computing with ELU and GELU
-    Infinite Networks <https://arxiv.org/abs/2002.08517>`_".
-    """
-    cov1, nngp, cov2, ntk = k.cov1, k.nngp, k.cov2, k.ntk
+            if ntk is not None:
+                second = 0.25 + angles / (2 * math.pi)
+                first = 1 / delta_sq + (1 - prod) / prod_plus_1 + 1
+                first = first * nngp / delta / (2 * math.pi)
+                dot_sigma = first + second
+                ntk = ntk * dot_sigma
+            return new_nngp, ntk
 
-    cov1_plus_1 = cov1 + 1
-    cov2_plus_1 = None if cov2 is None else cov2 + 1
+        def nngp_fn_diag(v):
+            root = torch.sqrt(1 + 2 * v)
+            out = v / ((v + 1) * torch.sqrt(1 + 2 * v))
+            out += torch.atan2(v, root) / 2
+            out /= math.pi
+            out += 0.25
+            out *= v
+            return out
 
-    prod11_plus_1, prod12_plus_1, prod22_plus_1 = get_diagonal_outer_prods(
-        cov1_plus_1, cov2_plus_1, k.diagonal_batch, k.diagonal_spatial, op.mul)
-    prod11, prod12, prod22 = get_diagonal_outer_prods(
-        cov1, cov2, k.diagonal_batch, k.diagonal_spatial, op.mul)
+        nngp, ntk = nngp_ntk_fn(nngp, prod12, prod12_p1, ntk)
 
-    def nngp_ntk_fn(
-        nngp: jnp.ndarray,
-        prod: jnp.ndarray,
-        prod_plus_1: jnp.ndarray,
-        ntk: Optional[jnp.ndarray] = None
-    ) -> tuple[jnp.ndarray, Optional[jnp.ndarray]]:
-      delta_squared = prod_plus_1 - nngp**2
-      delta = _sqrt(delta_squared)
-      angles = jnp.arctan2(nngp, delta)
-      new_nngp = (nngp**2 + prod * delta_squared) / (prod_plus_1 * delta)
-      new_nngp += nngp * angles
-      new_nngp /= 2 * jnp.pi
-      new_nngp += 0.25 * nngp
+        if k.diagonal_batch and k.diagonal_spatial:
+            cov1 = nngp_fn_diag(cov1)
+            if cov2 is not None:
+                cov2 = nngp_fn_diag(cov2)
+        else:
+            cov1, _ = nngp_ntk_fn(cov1, prod11, prod11_p1, None)
+            if cov2 is not None:
+                cov2, _ = nngp_ntk_fn(cov2, prod22, prod22_p1, None)
 
-      if ntk is not None:
-        second_term = 0.25 + angles / (2 * jnp.pi)
-        first_term = 1 / delta_squared + (1 - prod) / prod_plus_1 + 1
-        first_term *= nngp / delta / (2. * jnp.pi)
-        dot_sigma = first_term + second_term
-        ntk *= dot_sigma
-      return new_nngp, ntk
+        return k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk)
 
-    def nngp_fn_diag(nngp: jnp.ndarray) -> jnp.ndarray:
-      square_root = jnp.sqrt(1. + 2. * nngp)
-      new_nngp = nngp / ((nngp + 1.) * jnp.sqrt(1. + 2. * nngp))
-      new_nngp += jnp.arctan2(nngp, square_root) / 2
-      new_nngp /= jnp.pi
-      new_nngp += 0.25
-      new_nngp *= nngp
-      return new_nngp
-
-    nngp, ntk = nngp_ntk_fn(nngp, prod12, prod12_plus_1, ntk)
-
-    if k.diagonal_batch and k.diagonal_spatial:
-      cov1 = nngp_fn_diag(cov1)
-      if cov2 is not None:
-        cov2 = nngp_fn_diag(cov2)
-    else:
-      cov1, _ = nngp_ntk_fn(cov1, prod11, prod11_plus_1)
-      if cov2 is not None:
-        cov2, _ = nngp_ntk_fn(cov2, prod22, prod22_plus_1)
-
-    return k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk)
-
-  return _elementwise(fn, 'Gelu', kernel_fn)
+    return _elementwise(fn, 'Gelu', kernel_fn)
 
 
 @layer
 @supports_masking(remask_kernel=True)
-def Sin(
-    a: float = 1.,
-    b: float = 1.,
-    c: float = 0.
-) -> InternalLayer:
-  """Affine transform of `Sin` nonlinearity, i.e. `a sin(b*x + c)`.
+def Sin(a: float = 1., b: float = 1., c: float = 0.) -> InternalLayer:
+    def fn(x: torch.Tensor) -> torch.Tensor:
+        return a * torch.sin(b * x + c)
 
-  Args:
-    a: output scale.
-    b: input scale.
-    c: input phase shift.
-  Returns:
-    `(init_fn, apply_fn, kernel_fn)`.
-  """
-  def fn(x):
-    return a * jnp.sin(b * x + c)
+    def kernel_fn(k: Kernel) -> Kernel:
+        cov1, nngp, cov2, ntk = k.cov1, k.nngp, k.cov2, k.ntk
+        sum11, sum12, sum22 = get_diagonal_outer_prods(cov1, cov2, k.diagonal_batch, k.diagonal_spatial, op.add)
+        half_a_sq = a * a / 2.0
 
-  def kernel_fn(k: Kernel) -> Kernel:
-    cov1, nngp, cov2, ntk = k.cov1, k.nngp, k.cov2, k.ntk
+        def nngp_ntk_fn(nngp, sum_, ntk=None):
+            s1 = torch.exp(b*b * (-0.5 * sum_ + nngp))
+            s2 = torch.exp(b*b * (-0.5 * sum_ - nngp)) * math.cos(2 * c)
+            new = half_a_sq * (s1 - s2)
+            if ntk is not None:
+                ntk = ntk * (half_a_sq * b*b * (s1 + s2))
+            return new, ntk
 
-    sum11, sum12, sum22 = get_diagonal_outer_prods(cov1,
-                                                   cov2,
-                                                   k.diagonal_batch,
-                                                   k.diagonal_spatial,
-                                                   op.add)
-    half_a_square = a**2 / 2.
+        def nngp_fn_diag(v):
+            return half_a_sq * (1 - torch.exp(-2 * b*b * v) * math.cos(2 * c))
 
-    def nngp_ntk_fn(nngp, sum_, ntk=None):
-      s1 = jnp.exp(b ** 2 * (-0.5 * sum_ + nngp))
-      s2 = jnp.exp(b ** 2 * (-0.5 * sum_ - nngp)) * jnp.cos(2 * c)
-      nngp = half_a_square * (s1 - s2)
-      if ntk is not None:
-        ntk *= half_a_square * b**2 * (s1 + s2)
-      return nngp, ntk
+        nngp, ntk = nngp_ntk_fn(nngp, sum12, ntk)
 
-    def nngp_fn_diag(nngp):
-      return half_a_square * (1. - jnp.exp(-2 * b ** 2 * nngp) * jnp.cos(2 * c))
+        if k.diagonal_batch and k.diagonal_spatial:
+            cov1 = nngp_fn_diag(cov1)
+            if cov2 is not None:
+                cov2 = nngp_fn_diag(cov2)
+        else:
+            cov1, _ = nngp_ntk_fn(cov1, sum11, None)
+            if cov2 is not None:
+                cov2, _ = nngp_ntk_fn(cov2, sum22, None)
 
-    nngp, ntk = nngp_ntk_fn(nngp, sum12, ntk)
+        return k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk)
 
-    if k.diagonal_batch and k.diagonal_spatial:
-      cov1 = nngp_fn_diag(cov1)
-      if cov2 is not None:
-        cov2 = nngp_fn_diag(cov2)
-    else:
-      cov1, _ = nngp_ntk_fn(cov1, sum11)
-      if cov2 is not None:
-        cov2, _ = nngp_ntk_fn(cov2, sum22)
-
-    return k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk)
-
-  return _elementwise(fn, f'Sin({a}, {b}, {c})', kernel_fn)
+    return _elementwise(fn, f'Sin({a}, {b}, {c})', kernel_fn)
 
 
-def Cos(
-    a: float = 1.,
-    b: float = 1.,
-    c: float = 0.
-) -> InternalLayer:
-  """Affine transform of `Cos` nonlinearity, i.e. `a cos(b*x + c)`.
-
-  Args:
-    a: output scale.
-    b: input scale.
-    c: input phase shift.
-  Returns:
-    `(init_fn, apply_fn, kernel_fn)`.
-  """
-  return Sin(a=a, b=b, c=c + jnp.pi / 2)
+def Cos(a: float = 1., b: float = 1., c: float = 0.) -> InternalLayer:
+    return Sin(a=a, b=b, c=c + math.pi / 2)
 
 
 @layer
 @supports_masking(remask_kernel=True)
 def Rbf(gamma: float = 1.0) -> InternalLayer:
-  """Dual activation function for normalized RBF or squared exponential kernel.
+    def fn(x: torch.Tensor) -> torch.Tensor:
+        return math.sqrt(2.0) * torch.sin(math.sqrt(2.0 * gamma) * x + math.pi / 4.0)
 
-  Dual activation function is `f(x) = sqrt(2)*sin(sqrt(2*gamma) x + pi/4)`.
-  NNGP kernel transformation correspond to (with input dimension `d`)
-  `k = exp(- gamma / d * ||x - x'||^2) = exp(- gamma*(q11 + q22 - 2 * q12))`.
+    def kernel_fn(k: Kernel) -> Kernel:
+        cov1, nngp, cov2, ntk = k.cov1, k.nngp, k.cov2, k.ntk
+        sum11, sum12, sum22 = get_diagonal_outer_prods(cov1, cov2, k.diagonal_batch, k.diagonal_spatial, op.add)
 
-  Args:
-    gamma:
-      related to characteristic length-scale (l) that controls width of the
-      kernel, where `gamma = 1 / (2 l^2)`.
+        def nngp_ntk_fn(nngp, sum_, ntk):
+            new = torch.exp(gamma * (-sum_ + 2 * nngp))
+            if ntk is not None:
+                ntk = ntk * (2 * gamma * new)
+            return new, ntk
 
-  Returns:
-    `(init_fn, apply_fn, kernel_fn)`.
-  """
-  def fn(x):
-    return jnp.sqrt(2) * jnp.sin(jnp.sqrt(2 * gamma) * x + jnp.pi / 4)
+        def nngp_fn_diag(v):
+            return torch.ones_like(v)
 
-  def kernel_fn(k: Kernel) -> Kernel:
-    """Compute new kernels after an `Rbf` layer."""
-    cov1, nngp, cov2, ntk = k.cov1, k.nngp, k.cov2, k.ntk
+        nngp, ntk = nngp_ntk_fn(nngp, sum12, ntk)
 
-    sum11, sum12, sum22 = get_diagonal_outer_prods(cov1,
-                                                   cov2,
-                                                   k.diagonal_batch,
-                                                   k.diagonal_spatial,
-                                                   op.add)
+        if k.diagonal_batch and k.diagonal_spatial:
+            cov1 = nngp_fn_diag(cov1)
+            if cov2 is not None:
+                cov2 = nngp_fn_diag(cov2)
+        else:
+            cov1, _ = nngp_ntk_fn(cov1, sum11, None)
+            if cov2 is not None:
+                cov2, _ = nngp_ntk_fn(cov2, sum22, None)
 
-    def nngp_ntk_fn(nngp, sum_, ntk):
-      nngp = jnp.exp(gamma * (-sum_ + 2 * nngp))
-      if ntk is not None:
-        ntk *= 2 * gamma * nngp
-      return nngp, ntk
+        return k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk)
 
-    def nngp_fn_diag(nngp):
-      return jnp.ones_like(nngp)
-
-    nngp, ntk = nngp_ntk_fn(nngp, sum12, ntk)
-
-    if k.diagonal_batch and k.diagonal_spatial:
-      cov1 = nngp_fn_diag(cov1)
-      if cov2 is not None:
-        cov2 = nngp_fn_diag(cov2)
-    else:
-      cov1, _ = nngp_ntk_fn(cov1, sum11, None)
-      if cov2 is not None:
-        cov2, _ = nngp_ntk_fn(cov2, sum22, None)
-
-    return k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk)
-
-  return _elementwise(fn, f'Rbf({gamma})', kernel_fn)
+    return _elementwise(fn, f'Rbf({gamma})', kernel_fn)
 
 
 @layer
 @supports_masking(remask_kernel=False)
-def ABRelu(
-    a: float,
-    b: float,
-    do_stabilize: bool = False
-) -> InternalLayer:
-  """ABReLU nonlinearity, i.e. `a * min(x, 0) + b * max(x, 0)`.
+def ABRelu(a: float, b: float, do_stabilize: bool = False) -> InternalLayer:
+    def fn(x: torch.Tensor) -> torch.Tensor:
+        return a * torch.minimum(x, torch.zeros_like(x)) + b * torch.maximum(x, torch.zeros_like(x))
 
-  Args:
-    a: slope for `x < 0`.
-    b: slope for `x > 0`.
-    do_stabilize: set to `True` for very deep networks.
+    def kernel_fn(k: Kernel) -> Kernel:
+        cov1, nngp, cov2, ntk = k.cov1, k.nngp, k.cov2, k.ntk
 
-  Returns:
-    `(init_fn, apply_fn, kernel_fn)`.
-  """
-  def fn(x):
-    return a * jnp.minimum(x, 0) + b * jnp.maximum(x, 0)
+        if do_stabilize:
+            # scale by max magnitude; avoid /0
+            factor = torch.maximum(torch.max(torch.abs(nngp)), torch.tensor(1e-12, device=nngp.device, dtype=nngp.dtype))
+            nngp = nngp / factor
+            cov1 = cov1 / factor
+            if cov2 is not None:
+                cov2 = cov2 / factor
 
-  def kernel_fn(k: Kernel) -> Kernel:
-    """Compute new kernels after an `ABRelu` layer.
+        prod11, prod12, prod22 = get_diagonal_outer_prods(cov1, cov2, k.diagonal_batch, k.diagonal_spatial, op.mul)
 
-    See "`Invariance of Weight Distributions in Rectified MLPs
-    <https://arxiv.org/abs/1711.09090>`_" for the leaky ReLU derivation.
-    """
-    cov1, nngp, cov2, ntk = k.cov1, k.nngp, k.cov2, k.ntk
+        def nngp_ntk_fn(nngp, prod, ntk=None):
+            square_root = _sqrt(prod - nngp**2, 1e-30)
+            angles = _arctan2(square_root, nngp, fill_zero=math.pi / 2)
 
-    if do_stabilize:
-      factor = jnp.maximum(jnp.max(jnp.abs(nngp)), 1e-12)
-      nngp /= factor
-      cov1 /= factor
-      if cov2 is not None:
-        cov2 /= factor
+            fac = (a - b)**2 / (2 * math.pi)
+            dot_sigma = (a*a + b*b) / 2 - fac * angles
+            new = fac * square_root + dot_sigma * nngp
+            if ntk is not None:
+                ntk = ntk * dot_sigma
+            return new, ntk
 
-    prod11, prod12, prod22 = get_diagonal_outer_prods(cov1,
-                                                      cov2,
-                                                      k.diagonal_batch,
-                                                      k.diagonal_spatial,
-                                                      op.mul)
+        def nngp_fn_diag(v):
+            return (a*a + b*b) / 2 * v
 
-    def nngp_ntk_fn(nngp, prod, ntk=None):
-      square_root = _sqrt(prod - nngp**2)
-      angles = _arctan2(square_root, nngp, fill_zero=jnp.pi / 2)
+        nngp, ntk = nngp_ntk_fn(nngp, prod12, ntk)
 
-      factor = (a - b)**2 / (2 * jnp.pi)
-      dot_sigma = (a**2 + b**2) / 2 - factor * angles
-      nngp = factor * square_root + dot_sigma * nngp
+        if k.diagonal_batch and k.diagonal_spatial:
+            cov1 = nngp_fn_diag(cov1)
+            if cov2 is not None:
+                cov2 = nngp_fn_diag(cov2)
+        else:
+            cov1, _ = nngp_ntk_fn(cov1, prod11, None)
+            if cov2 is not None:
+                cov2, _ = nngp_ntk_fn(cov2, prod22, None)
 
-      if ntk is not None:
-        ntk *= dot_sigma
+        if do_stabilize:
+            nngp = nngp * factor
+            cov1 = cov1 * factor
+            if cov2 is not None:
+                cov2 = cov2 * factor
 
-      return nngp, ntk
+        return k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk)
 
-    def nngp_fn_diag(nngp):
-      return (a**2 + b**2) / 2 * nngp
-
-    nngp, ntk = nngp_ntk_fn(nngp, prod12, ntk=ntk)
-
-    if k.diagonal_batch and k.diagonal_spatial:
-      cov1 = nngp_fn_diag(cov1)
-      if cov2 is not None:
-        cov2 = nngp_fn_diag(cov2)
-    else:
-      cov1, _ = nngp_ntk_fn(cov1, prod11)
-      if cov2 is not None:
-        cov2, _ = nngp_ntk_fn(cov2, prod22)
-
-    if do_stabilize:
-      nngp *= factor
-      cov1 *= factor
-      if cov2 is not None:
-        cov2 *= factor
-
-    return k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk)
-
-  return _elementwise(fn, f'ABReLU({a}, {b})', kernel_fn)
+    return _elementwise(fn, f'ABRelu({a}, {b})', kernel_fn)
 
 
 def Relu(do_stabilize: bool = False) -> InternalLayer:
-  """ReLU nonlinearity.
-
-  Args:
-    do_stabilize: set to `True` for very deep networks.
-
-  Returns:
-    `(init_fn, apply_fn, kernel_fn)`.
-  """
-  return ABRelu(0, 1, do_stabilize)
+    return ABRelu(0.0, 1.0, do_stabilize)
 
 
 def LeakyRelu(alpha: float, do_stabilize: bool = False) -> InternalLayer:
-  """Leaky ReLU nonlinearity, i.e. `alpha * min(x, 0) + max(x, 0)`.
-
-  Args:
-    alpha: slope for `x < 0`.
-    do_stabilize: set to `True` for very deep networks.
-
-  Returns:
-    `(init_fn, apply_fn, kernel_fn)`.
-  """
-  return ABRelu(alpha, 1, do_stabilize)
+    return ABRelu(alpha, 1.0, do_stabilize)
 
 
 def Abs(do_stabilize: bool = False) -> InternalLayer:
-  """Absolute value nonlinearity.
-
-  Args:
-    do_stabilize: set to `True` for very deep networks.
-
-  Returns:
-    `(init_fn, apply_fn, kernel_fn)`.
-  """
-  return ABRelu(-1, 1, do_stabilize)
+    return ABRelu(-1.0, 1.0, do_stabilize)
 
 
 @layer
 @supports_masking(remask_kernel=False)
 def Sign() -> InternalLayer:
-  """Sign function.
+    def fn(x: torch.Tensor) -> torch.Tensor:
+        return torch.sign(x)
 
-  Returns:
-    `(init_fn, apply_fn, kernel_fn)`.
-  """
-  def fn(x):
-    return jnp.sign(x)
+    def kernel_fn(k: Kernel) -> Kernel:
+        cov1, nngp, cov2, ntk = k.cov1, k.nngp, k.cov2, k.ntk
+        if ntk is not None:
+            ntk = torch.zeros_like(ntk)
+        _, prod12, _ = get_diagonal_outer_prods(cov1, cov2, k.diagonal_batch, k.diagonal_spatial, op.mul)
+        angles = _arctan2(_sqrt(prod12 - nngp**2, 1e-30), nngp, fill_zero=math.pi / 2)
+        nngp = 1 - angles * 2 / math.pi
+        cov1 = torch.where(cov1 == 0., torch.zeros_like(cov1), torch.ones_like(cov1))
+        cov2 = cov2 if cov2 is None else torch.where(cov2 == 0., torch.zeros_like(cov2), torch.ones_like(cov2))
+        return k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk)
 
-  def kernel_fn(k: Kernel) -> Kernel:
-    cov1, nngp, cov2, ntk = k.cov1, k.nngp, k.cov2, k.ntk
-    if ntk is not None:
-      ntk = jnp.zeros_like(ntk)
-    _, prod12, _ = get_diagonal_outer_prods(cov1,
-                                            cov2,
-                                            k.diagonal_batch,
-                                            k.diagonal_spatial,
-                                            op.mul)
-    angles = _arctan2(_sqrt(prod12 - nngp**2), nngp, fill_zero=jnp.pi / 2)
-    nngp = 1 - angles * 2 / jnp.pi
-    cov1 = jnp.where(cov1 == 0., 0., 1.)
-    cov2 = cov2 if cov2 is None else jnp.where(cov2 == 0, 0., 1.)
-    k = k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk)
-    return k
-
-  return _elementwise(fn, 'Sign', kernel_fn)
+    return _elementwise(fn, 'Sign', kernel_fn)
 
 
 @layer
 @supports_masking(remask_kernel=True)
-def Exp(a: float = 1, b: float = 1) -> InternalLayer:
-  """Elementwise natural exponent function `a * jnp.exp(b * x)`.
+def Exp(a: float = 1., b: float = 1.) -> InternalLayer:
+    def fn(x: torch.Tensor) -> torch.Tensor:
+        return a * torch.exp(b * x)
 
-  Returns:
-    `(init_fn, apply_fn, kernel_fn)`.
-  """
+    def kernel_fn(k: Kernel) -> Kernel:
+        cov1, nngp, cov2, ntk = k.cov1, k.nngp, k.cov2, k.ntk
+        sum11, sum12, sum22 = get_diagonal_outer_prods(cov1, cov2, k.diagonal_batch, k.diagonal_spatial, op.add)
 
-  def fn(x):
-    return a * jnp.exp(b * x)
+        def nngp_ntk_fn(nngp, sum_, ntk):
+            new = torch.exp(b*b * (sum_ / 2 + nngp))
+            if ntk is not None:
+                ntk = ntk * (b*b * new)
+            return new, ntk
 
-  def kernel_fn(k: Kernel) -> Kernel:
-    """Compute new kernels after an `Exp` layer."""
-    cov1, nngp, cov2, ntk = k.cov1, k.nngp, k.cov2, k.ntk
+        def nngp_fn_diag(v):
+            return torch.exp(2 * b*b * v)
 
-    sum11, sum12, sum22 = get_diagonal_outer_prods(
-        cov1, cov2, k.diagonal_batch, k.diagonal_spatial, op.add)
+        nngp, ntk = nngp_ntk_fn(nngp, sum12, ntk)
 
-    def nngp_ntk_fn(nngp, sum_, ntk):
-      nngp = jnp.exp(b ** 2 * (sum_ / 2 + nngp))
-      if ntk is not None:
-        ntk *= b**2 * nngp
-      return nngp, ntk
+        if k.diagonal_batch and k.diagonal_spatial:
+            cov1 = nngp_fn_diag(cov1)
+            if cov2 is not None:
+                cov2 = nngp_fn_diag(cov2)
+        else:
+            cov1, _ = nngp_ntk_fn(cov1, sum11, None)
+            if cov2 is not None:
+                cov2, _ = nngp_ntk_fn(cov2, sum22, None)
 
-    def nngp_fn_diag(nngp):
-      return jnp.exp(2 * b ** 2 * nngp)
+        return (k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk)) * a
 
-    nngp, ntk = nngp_ntk_fn(nngp, sum12, ntk)
-
-    if k.diagonal_batch and k.diagonal_spatial:
-      cov1 = nngp_fn_diag(cov1)
-      if cov2 is not None:
-        cov2 = nngp_fn_diag(cov2)
-    else:
-      cov1, _ = nngp_ntk_fn(cov1, sum11, None)
-      if cov2 is not None:
-        cov2, _ = nngp_ntk_fn(cov2, sum22, None)
-
-    return k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk) * a
-
-  return _elementwise(fn, f'Exp({a}, {b})', kernel_fn)
+    return _elementwise(fn, f'Exp({a}, {b})', kernel_fn)
 
 
 @layer
 @supports_masking(remask_kernel=True)
-def Gaussian(a: float = 1, b: float = -1) -> InternalLayer:
-  """Elementwise Gaussian function `a * jnp.exp(b * x**2)`.
+def Gaussian(a: float = 1., b: float = -1.) -> InternalLayer:
+    def fn(x: torch.Tensor) -> torch.Tensor:
+        return a * torch.exp(b * x * x)
 
-  Returns:
-    `(init_fn, apply_fn, kernel_fn)`.
-  """
-  def fn(x):
-    return a * jnp.exp(b * x ** 2)
+    def kernel_fn(k: Kernel) -> Kernel:
+        cov1, nngp, cov2, ntk = k.cov1, k.nngp, k.cov2, k.ntk
+        cov1_denom = 1 - 2 * b * cov1
+        cov2_denom = None if cov2 is None else 1 - 2 * b * cov2
 
-  def kernel_fn(k: Kernel) -> Kernel:
-    cov1, nngp, cov2, ntk = k.cov1, k.nngp, k.cov2, k.ntk
+        prod11, prod12, prod22 = get_diagonal_outer_prods(
+            cov1_denom, cov2_denom, k.diagonal_batch, k.diagonal_spatial, op.mul
+        )
 
-    cov1_denom = 1 - 2 * b * cov1
-    cov2_denom = None if cov2 is None else 1 - 2 * b * cov2
+        factor = 4 * b * b
 
-    prod11, prod12, prod22 = get_diagonal_outer_prods(cov1_denom,
-                                                      cov2_denom,
-                                                      k.diagonal_batch,
-                                                      k.diagonal_spatial,
-                                                      op.mul)
+        def nngp_ntk_fn(nngp, prod, ntk=None):
+            det = _sqrt(prod - factor * nngp**2, 1e-30)
+            if ntk is not None:
+                ntk = ntk * (factor * nngp / det**3)
+            return 1 / det, ntk
 
-    factor = 4 * b**2
+        def nngp_fn_diag(v):
+            return 1 / _sqrt(1 - 4 * b * v, 1e-30)
 
-    def nngp_ntk_fn(
-        nngp: jnp.ndarray,
-        prod: jnp.ndarray,
-        ntk: Optional[jnp.ndarray] = None
-    ) -> tuple[jnp.ndarray, Optional[jnp.ndarray]]:
-      det = _sqrt((prod - factor * nngp**2))
+        nngp, ntk = nngp_ntk_fn(nngp, prod12, ntk)
 
-      if ntk is not None:
-        ntk *= factor * nngp / det**3
+        if k.diagonal_batch and k.diagonal_spatial:
+            cov1 = nngp_fn_diag(cov1)
+            if cov2 is not None:
+                cov2 = nngp_fn_diag(cov2)
+        else:
+            cov1, _ = nngp_ntk_fn(cov1, prod11, None)
+            if cov2 is not None:
+                cov2, _ = nngp_ntk_fn(cov2, prod22, None)
 
-      nngp = 1 / det
-      return nngp, ntk
+        return (k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk)) * a
 
-    def nngp_fn_diag(nngp: jnp.ndarray) -> jnp.ndarray:
-      return 1 / _sqrt(1 - 4 * b * nngp)
-
-    nngp, ntk = nngp_ntk_fn(nngp, prod12, ntk)
-
-    if k.diagonal_batch and k.diagonal_spatial:
-      cov1 = nngp_fn_diag(cov1)
-      if cov2 is not None:
-        cov2 = nngp_fn_diag(cov2)
-    else:
-      cov1, _ = nngp_ntk_fn(cov1, prod11)
-      if cov2 is not None:
-        cov2, _ = nngp_ntk_fn(cov2, prod22)
-
-    return k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk) * a
-
-  return _elementwise(fn, f'Gaussian({a}, {b})', kernel_fn)
+    return _elementwise(fn, f'Gaussian({a}, {b})', kernel_fn)
 
 
 @layer
 @supports_masking(remask_kernel=True)
-def ExpNormalized(
-    gamma: float = 1,
-    shift: float = -1,
-    do_clip: bool = False
-) -> InternalLayer:
-  """Simulates the "Gaussian normalized kernel".
+def ExpNormalized(gamma: float = 1., shift: float = -1., do_clip: bool = False) -> InternalLayer:
+    """Simulates the Gaussian normalized kernel. Finite-width apply_fn is not supported."""
+    def kernel_fn(k: Kernel) -> Kernel:
+        cov1, cov2, nngp, ntk = k.cov1, k.cov2, k.nngp, k.ntk
+        prod11, prod12, prod22 = get_diagonal_outer_prods(cov1, cov2, k.diagonal_batch, k.diagonal_spatial, op.mul)
 
-  See page 6 in
-  "`Neural Kernels Without Tangents <https://arxiv.org/abs/2003.02237>`_".
+        tol = 1e-30
+        prod11 = _sqrt(prod11, tol)
+        prod12 = _sqrt(prod12, tol)
+        prod22 = _sqrt(prod22, tol) if prod22 is not None else None
 
-  Args:
-    gamma: exponent scalar coefficient.
-    shift: shift exponentiated normalized covariance by this much.
-    do_clip: True to clip normalized covariance, potentially improving accuracy.
+        def exp_part(cov, prod):
+            if cov is not None:
+                cov = cov / prod
+                if do_clip:
+                    cov = torch.clamp(cov, -1.0, 1.0)
+                cov = torch.exp(gamma * (cov + shift))
+            return cov
 
-  Returns:
-    `(init_fn, apply_fn, kernel_fn)`.
+        exp12 = exp_part(nngp, prod12)
 
-  Raises:
-    NotImplementedError: if finite width `apply_fn` is called.
-  """
+        return k.replace(
+            nngp=prod12 * exp12,
+            cov1=prod11 * exp_part(cov1, prod11),
+            cov2=None if cov2 is None else prod22 * exp_part(cov2, prod22),
+            ntk=ntk if ntk is None else gamma * ntk * exp12
+        )
 
-  def kernel_fn(k: Kernel) -> Kernel:
-    cov1, cov2, nngp, ntk = k.cov1, k.cov2, k.nngp, k.ntk
-    prod11, prod12, prod22 = get_diagonal_outer_prods(cov1,
-                                                      cov2,
-                                                      k.diagonal_batch,
-                                                      k.diagonal_spatial,
-                                                      op.mul)
-    tol = 1e-30
-    prod11 = _sqrt(prod11, tol)
-    prod12 = _sqrt(prod12, tol)
-    prod22 = _sqrt(prod22, tol) if prod22 is not None else None
-
-    def exp(cov, prod):
-      if cov is not None:
-        cov /= prod
-        if do_clip:
-          cov = jnp.clip(cov, -1, 1)
-        cov = jnp.exp(gamma * (cov + shift))
-      return cov
-
-    exp12 = exp(nngp, prod12)
-
-    return k.replace(
-        nngp=prod12 * exp12,
-        cov1=prod11 * exp(cov1, prod11),
-        cov2=None if cov2 is None else prod22 * exp(cov2, prod22),
-        ntk=ntk if ntk is None else gamma * ntk * exp12)
-
-  return _elementwise(None, 'ExpNormalized', kernel_fn)
+    return _elementwise(None, 'ExpNormalized', kernel_fn)
 
 
 @layer
 @supports_masking(remask_kernel=True)
 def Hermite(degree: int) -> InternalLayer:
-  """Hermite polynomials.
+    if degree < 0:
+        raise NotImplementedError('`degree` must be non-negative.')
 
-  Inputs to this layer are assumed to have unit norm, i.e.
-  `jnp.std(x, axis=channel_axis) == 1`. The Hermite polynomials are normalized
-  so that the L2 norm w.r.t. standard Gaussian is 1.
+    # Probabilists’ Hermite-e coefficients, normalized
+    p = np.polynomial.hermite_e.herme2poly([0] * degree + [1])[::-1]
+    coeff = float(_factorial(degree)) ** 0.5
+    p_t = torch.as_tensor(p, dtype=torch.get_default_dtype())
 
-  Args:
-    degree: a non-negative integer.
+    def fn(x: torch.Tensor) -> torch.Tensor:
+        # torch.polyval-like (Horner) with descending coeffs
+        out = torch.zeros_like(x)
+        for c in p_t:
+            out = out * x + c
+        return out / coeff
 
-  Returns:
-    `(init_fn, apply_fn, kernel_fn)`.
-  """
-  if degree < 0:
-    raise NotImplementedError('`degree` must be a non-negative integer.')
+    def kernel_fn(k: Kernel) -> Kernel:
+        warnings.warn(
+            'Inputs to Hermite are assumed to have unit norm across channels/features.'
+        )
+        cov1, nngp, cov2, ntk = k.cov1, k.nngp, k.cov2, k.ntk
+        if ntk is not None:
+            if degree == 0:
+                ntk = torch.zeros_like(ntk)
+            else:
+                ntk = degree * (nngp ** (degree - 1)) * ntk
 
-  p = np.polynomial.hermite_e.herme2poly([0] * degree + [1])[::-1]
-  coeff = functools.reduce(op.mul, range(1, degree + 1), 1)**0.5
+        def _power(mat: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+            return None if mat is None else mat ** degree
 
-  def fn(x):
-    return jnp.polyval(p, x) / coeff
+        nngp, cov1, cov2 = map(_power, (nngp, cov1, cov2))
+        return k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk)
 
-  def kernel_fn(k: Kernel) -> Kernel:
-    warnings.warn(
-        'Inputs to this layer are assumed to have unit norm across '
-        ' channels/features, i.e. jnp.std(x, axis=channel_axis) == 1.')
-
-    cov1, nngp, cov2, ntk = k.cov1, k.nngp, k.cov2, k.ntk
-
-    if ntk is not None:
-      if degree == 0:
-        ntk = jnp.zeros_like(ntk)
-      else:
-        ntk = degree * nngp**(degree - 1) * ntk
-
-    def _power(mat):
-      return mat**degree if mat is not None else None
-
-    nngp, cov1, cov2 = map(_power, (nngp, cov1, cov2))
-    k = k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk)
-    return k
-
-  return _elementwise(fn, f'{degree}-Hermite polynomial', kernel_fn)
+    return _elementwise(fn, f'{degree}-Hermite polynomial', kernel_fn)
 
 
 @layer
 @supports_masking(remask_kernel=False)
 def Monomial(degree: int) -> InternalLayer:
-  """Monomials, i.e. `x^degree`.
+    if degree not in [0, 1, 2, 3, 4, 5]:
+        raise NotImplementedError('degree must be in {0,1,2,3,4,5}.')
 
-  Args:
-    degree: an integer between 0 and 5.
+    def fn(x: torch.Tensor) -> torch.Tensor:
+        return x ** degree
 
-  Returns:
-    `(init_fn, apply_fn, kernel_fn)`.
-  """
-  if degree not in [0, 1, 2, 3, 4, 5]:
-    raise NotImplementedError('The `degree` must be an integer between '
-                              '`0` and `5`.')
+    def kernel_fn(k: Kernel) -> Kernel:
+        cov1, nngp, cov2, ntk = k.cov1, k.nngp, k.cov2, k.ntk
+        prod11, prod12, prod22 = get_diagonal_outer_prods(cov1, cov2, k.diagonal_batch, k.diagonal_spatial, op.mul)
 
-  def fn(x):
-    return x**degree
+        def nngp_ntk_fn(nngp, prod, ntk=None):
+            def nngp_fn(nngp, degree: int):
+                if degree == -1:
+                    return torch.zeros_like(nngp)
+                elif degree == 0:
+                    return torch.ones_like(nngp)
+                elif degree == 1:
+                    return nngp
+                elif degree == 2:
+                    return 2 * nngp**2 + prod
+                elif degree == 3:
+                    return 6 * nngp**3 + 9 * nngp * prod
+                elif degree == 4:
+                    return 3 * (8 * nngp**4 + 3 * prod * (8 * nngp**2 + prod))
+                elif degree == 5:
+                    return 15 * nngp * (8 * nngp**4 + 5 * prod * (8 * nngp**2 + 3 * prod))
+                else:
+                    raise NotImplementedError(degree)
 
-  def kernel_fn(k: Kernel) -> Kernel:
-    cov1, nngp, cov2, ntk = k.cov1, k.nngp, k.cov2, k.ntk
+            if ntk is not None:
+                ntk = ntk * (degree**2 * nngp_fn(nngp, degree - 1))
+            return nngp_fn(nngp, degree), ntk
 
-    prod11, prod12, prod22 = get_diagonal_outer_prods(cov1,
-                                                      cov2,
-                                                      k.diagonal_batch,
-                                                      k.diagonal_spatial,
-                                                      op.mul)
+        def nngp_fn_diag(v):
+            return _double_factorial(2 * degree - 1) * v ** degree
 
-    def nngp_ntk_fn(
-        nngp: jnp.ndarray,
-        prod: jnp.ndarray,
-        ntk: Optional[jnp.ndarray] = None
-    ) -> tuple[jnp.ndarray, Optional[jnp.ndarray]]:
+        nngp, ntk = nngp_ntk_fn(nngp, prod12, ntk)
 
-      def nngp_fn(nngp: jnp.ndarray, degree: int) -> jnp.ndarray:
-        if degree == -1:
-          nngp = jnp.zeros_like(nngp)
-
-        elif degree == 0:
-          nngp = jnp.ones_like(nngp)
-
-        elif degree == 1:
-          pass
-
-        elif degree == 2:
-          nngp = 2 * nngp ** 2 + prod
-
-        elif degree == 3:
-          nngp = 6 * nngp ** 3 + 9 * nngp * prod
-
-        elif degree == 4:
-          nngp = 3 * (8 * nngp ** 4 + 3 * prod * (8 * nngp ** 2 + prod))
-
-        elif degree == 5:
-          nngp = 15 * nngp * (
-              8 * nngp ** 4 + 5 * prod * (8 * nngp ** 2 + 3 * prod))
-
+        if k.diagonal_batch and k.diagonal_spatial:
+            cov1 = nngp_fn_diag(cov1)
+            if cov2 is not None:
+                cov2 = nngp_fn_diag(cov2)
         else:
-          raise NotImplementedError(degree)
+            cov1, _ = nngp_ntk_fn(cov1, prod11, None)
+            if cov2 is not None:
+                cov2, _ = nngp_ntk_fn(cov2, prod22, None)
 
-        return nngp
+        return k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk)
 
-      if ntk is not None:
-        ntk *= degree**2 * nngp_fn(nngp, degree - 1)
-
-      nngp = nngp_fn(nngp, degree)
-      return nngp, ntk
-
-    def nngp_fn_diag(nngp: jnp.ndarray) -> jnp.ndarray:
-      return _double_factorial(2 * degree - 1) * nngp**degree
-
-    nngp, ntk = nngp_ntk_fn(nngp, prod12, ntk)
-
-    if k.diagonal_batch and k.diagonal_spatial:
-      cov1 = nngp_fn_diag(cov1)
-      if cov2 is not None:
-        cov2 = nngp_fn_diag(cov2)
-    else:
-      cov1, _ = nngp_ntk_fn(cov1, prod11)
-      if cov2 is not None:
-        cov2, _ = nngp_ntk_fn(cov2, prod22)
-
-    k = k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk)
-    return k
-
-  return _elementwise(fn, f'{degree}-monomial', kernel_fn)
+    return _elementwise(fn, f'{degree}-monomial', kernel_fn)
 
 
 @layer
 @supports_masking(remask_kernel=False)
 def RectifiedMonomial(degree: int) -> InternalLayer:
-  """Rectified monomials, i.e. `(x >= 0) * x^degree`.
+    if degree < 0:
+        raise NotImplementedError('`degree` must be non-negative.')
 
-  Args:
-    degree: a non-negative integer power.
+    def fn(x: torch.Tensor) -> torch.Tensor:
+        return (x >= 0).to(x.dtype) * (x ** degree)
 
-  Returns:
-    `(init_fn, apply_fn, kernel_fn)`.
-  """
-  if degree < 0:
-    raise NotImplementedError('`degree` must be a non-negative integer.')
+    def kernel_fn(k: Kernel) -> Kernel:
+        cov1, nngp, cov2, ntk = k.cov1, k.nngp, k.cov2, k.ntk
+        prod11, prod12, prod22 = get_diagonal_outer_prods(cov1, cov2, k.diagonal_batch, k.diagonal_spatial, op.mul)
 
-  def fn(x):
-    return (x >= 0) * x**degree
+        # The `j` helper uses autograd for its derivative when needed (NTK path).
+        def j(nngp: torch.Tensor, sqrt_prod: torch.Tensor) -> torch.Tensor:
+            theta = torch.arccos(torch.clamp(nngp / sqrt_prod, -1.0, 1.0))
 
-  def kernel_fn(k: Kernel) -> Kernel:
-    cov1, nngp, cov2, ntk = k.cov1, k.nngp, k.cov2, k.ntk
+            def f0(theta: torch.Tensor) -> torch.Tensor:
+                return (math.pi - theta) / torch.sin(theta)
 
-    prod11, prod12, prod22 = get_diagonal_outer_prods(cov1,
-                                                      cov2,
-                                                      k.diagonal_batch,
-                                                      k.diagonal_spatial,
-                                                      op.mul)
+            # f_{k+1} = (d/dtheta f_k) / sin(theta)
+            def diff(f: Callable[[torch.Tensor], torch.Tensor]) -> Callable[[torch.Tensor], torch.Tensor]:
+                def df(theta: torch.Tensor) -> torch.Tensor:
+                    theta_req = theta.detach().requires_grad_(True)
+                    val = f(theta_req)
+                    (g,) = torch.autograd.grad(val.sum(), theta_req, retain_graph=False, create_graph=False)
+                    return g / torch.sin(theta)
+                return df
 
-    def j(nngp: jnp.ndarray, sqrt_prod: jnp.ndarray) -> jnp.ndarray:
-      theta = jnp.arccos(nngp / sqrt_prod)
+            f = f0
+            for _ in range(degree):
+                f = diff(f)
 
-      def f0(theta: jnp.ndarray) -> jnp.ndarray:
-        return (jnp.pi - theta) / jnp.sin(theta)
+            return ((-1)**degree) * (torch.sin(theta))**(2 * degree + 1) * f(theta)
 
-      def diff(f: Callable[[jnp.ndarray], jnp.ndarray]
-               ) -> Callable[[jnp.ndarray], jnp.ndarray]:
+        def nngp_ntk_fn(nngp, prod, ntk=None):
+            sqrt_prod = _sqrt(prod, 1e-30)
+            coeff = sqrt_prod**degree / (2 * math.pi)
 
-        def df(theta: jnp.ndarray) -> jnp.ndarray:
-          return jnp.vectorize(grad(f))(theta) / jnp.sin(theta)
+            if ntk is not None:
+                if degree == 0:
+                    ntk = torch.zeros_like(ntk)
+                else:
+                    # d/d nngp j(nngp, sqrt_prod)
+                    def j_wrt_cov12(c, s): return j(c, s)
+                    j_dot = _grad_wrt_cov12(j_wrt_cov12, nngp, sqrt_prod, sqrt_prod)  # var placeholders
+                    ntk = ntk * (coeff * j_dot)
 
-        return df
+            new = coeff * j(nngp, sqrt_prod)
+            return new, ntk
 
-      f = f0
-      for _ in range(degree):
-        f = diff(f)
+        def nngp_fn_diag(v):
+            return _double_factorial(2 * degree - 1) * v**degree / 2
 
-      return (-1)**degree * (jnp.sin(theta))**(2 * degree + 1) * f(theta)
+        nngp, ntk = nngp_ntk_fn(nngp, prod12, ntk)
 
-    def nngp_ntk_fn(
-        nngp: jnp.ndarray,
-        prod: jnp.ndarray,
-        ntk: Optional[jnp.ndarray] = None
-    ) -> tuple[jnp.ndarray, Optional[jnp.ndarray]]:
-
-      sqrt_prod = _sqrt(prod)
-      coeff = sqrt_prod**degree / (2 * jnp.pi)
-
-      if ntk is not None:
-        if degree == 0:
-          ntk = jnp.zeros_like(ntk)
+        if k.diagonal_batch and k.diagonal_spatial:
+            cov1 = nngp_fn_diag(cov1)
+            if cov2 is not None:
+                cov2 = nngp_fn_diag(cov2)
         else:
-          j_dot = jnp.vectorize(grad(j))(nngp, sqrt_prod)
-          ntk *= coeff * j_dot
+            cov1, _ = nngp_ntk_fn(cov1, prod11, None)
+            if cov2 is not None:
+                cov2, _ = nngp_ntk_fn(cov2, prod22, None)
 
-      nngp = coeff * j(nngp, sqrt_prod)
-      return nngp, ntk
+        return k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk)
 
-    def nngp_fn_diag(nngp: jnp.ndarray) -> jnp.ndarray:
-      return _double_factorial(2 * degree - 1) * nngp**degree / 2
-
-    nngp, ntk = nngp_ntk_fn(nngp, prod12, ntk)
-
-    if k.diagonal_batch and k.diagonal_spatial:
-      cov1 = nngp_fn_diag(cov1)
-      if cov2 is not None:
-        cov2 = nngp_fn_diag(cov2)
-    else:
-      cov1, _ = nngp_ntk_fn(cov1, prod11)
-      if cov2 is not None:
-        cov2, _ = nngp_ntk_fn(cov2, prod22)
-
-    k = k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk)
-    return k
-
-  return _elementwise(fn, f'{degree}-rectified-monomial', kernel_fn)
+    return _elementwise(fn, f'{degree}-rectified-monomial', kernel_fn)
 
 
 @layer
 @supports_masking(remask_kernel=False)
 def Polynomial(coef: Sequence[float]) -> InternalLayer:
-  """Polynomials, i.e. `coef[0] + coef[1] * x + … + coef[n] * x**n`.
+    coef = torch.as_tensor(np.array(coef)[::-1], dtype=torch.get_default_dtype())  # descending for Horner
 
-  Args:
-    coef:
-      a sequence of coefficients. Follows
-      :class:`numpy.polynomial.polynomial.Polynomial` API.
+    def fn(x: torch.Tensor) -> torch.Tensor:
+        out = torch.zeros_like(x)
+        for c in coef:
+            out = out * x + c
+        return out
 
-  Returns:
-    `(init_fn, apply_fn, kernel_fn)`.
-  """
-  coef = np.array(coef)
+    degree = len(coef)
 
-  def fn(x):
-    return jnp.polyval(coef[::-1], x)
+    def kernel_fn(k: Kernel) -> Kernel:
+        cov1, nngp, cov2, ntk = k.cov1, k.nngp, k.cov2, k.ntk
 
-  degree = len(coef)
+        def r(n: Optional[torch.Tensor], l: int) -> Optional[torch.Tensor]:
+            if n is None:
+                return None
+            # Build coef_l as in JAX code
+            # coef is reversed here (descending), but below we build by degree index
+            np_coef = coef.detach().cpu().numpy()[::-1]  # back to ascending for the polynomial logic
+            coef_dict = {
+                2 * i + l: np_coef[2 * i + l] * _factorial(2 * i + l) / (2**i * _factorial(i) * _factorial(l)**0.5)
+                for i in range(0, (degree - 1 - l) // 2 + 1)
+            }
+            coef_l = np.array([coef_dict.get(i, 0.0) for i in range(degree)], dtype=np.float64)[::-1]  # descending
+            coef_l_t = torch.as_tensor(coef_l, dtype=n.dtype, device=n.device)
+            # Horner with descending coef_l_t
+            out = torch.zeros_like(n)
+            for c in coef_l_t:
+                out = out * n.sqrt() + c
+            return out
 
-  def kernel_fn(k: Kernel) -> Kernel:
-    cov1, nngp, cov2, ntk = k.cov1, k.nngp, k.cov2, k.ntk
+        if degree == 0:
+            rs11, rs12, rs22 = [], [], []
+        else:
+            rs11, rs12, rs22 = list(zip(*[
+                get_diagonal_outer_prods(
+                    r(cov1, l), r(cov2, l), k.diagonal_batch, k.diagonal_spatial, op.mul
+                )
+                for l in range(degree)
+            ]))
 
-    def r(n: Optional[jnp.ndarray], l: int) -> Optional[jnp.ndarray]:
-      if n is None:
-        return None
+        prod11, prod12, prod22 = get_diagonal_outer_prods(cov1, cov2, k.diagonal_batch, k.diagonal_spatial, op.mul)
 
-      coef_dict = {
-          2 * i + l: coef[2 * i + l] * _factorial(2 * i + l) / (
-              2**i * _factorial(i) * _factorial(l)**0.5)
-          for i in range(0, (degree - 1 - l) // 2 + 1)
-      }
-      coef_l = np.array(
-          [coef_dict[i] if i in coef_dict else 0 for i in range(degree)])
-      return jnp.polyval(coef_l[::-1], n ** 0.5)
+        def nngp_ntk_fn(nngp, prod, r_prods, ntk=None):
+            ratio = nngp / _sqrt(prod, 1e-30)
 
-    if degree == 0:
-      rs11, rs12, rs22 = [], [], []
-    else:
-      rs11, rs12, rs22 = list(zip(*[
-          get_diagonal_outer_prods(r(cov1, l),
-                                   r(cov2, l),
-                                   k.diagonal_batch,
-                                   k.diagonal_spatial,
-                                   op.mul)
-          for l in range(degree)
-      ]))
+            if ntk is not None:
+                t_dot = torch.zeros_like(ntk)
+                for l in range(1, degree):
+                    t_dot = t_dot + l * r_prods[l] * ratio ** (l - 1)
+                ntk = ntk * (t_dot / _sqrt(prod, 1e-30))
 
-    prod11, prod12, prod22 = get_diagonal_outer_prods(cov1,
-                                                      cov2,
-                                                      k.diagonal_batch,
-                                                      k.diagonal_spatial,
-                                                      op.mul)
+            out = torch.zeros_like(nngp)
+            for l in range(degree):
+                out = out + r_prods[l] * ratio ** l
+            return out, ntk
 
-    def nngp_ntk_fn(
-        nngp: jnp.ndarray,
-        prod: jnp.ndarray,
-        r_prods: Sequence[jnp.ndarray],
-        ntk: Optional[jnp.ndarray] = None
-    ) -> tuple[jnp.ndarray, Optional[jnp.ndarray]]:
-      ratio = nngp / _sqrt(prod)
+        def nngp_fn_diag(v, r_prods):
+            out = torch.zeros_like(v)
+            for l in range(degree):
+                out = out + r_prods[l]
+            return out
 
-      if ntk is not None:
-        t_dot = jnp.zeros_like(ntk)
-        for l in range(1, degree):
-          t_dot += l * r_prods[l] * ratio**(l - 1)
-        ntk *= t_dot / _sqrt(prod)
+        nngp, ntk = nngp_ntk_fn(nngp, prod12, rs12, ntk)
 
-      nngp = jnp.zeros_like(nngp)
-      for l in range(degree):
-        nngp += r_prods[l] * ratio ** l
+        if k.diagonal_batch and k.diagonal_spatial:
+            cov1 = nngp_fn_diag(cov1, rs11)
+            if cov2 is not None:
+                cov2 = nngp_fn_diag(cov2, rs22)
+        else:
+            cov1, _ = nngp_ntk_fn(cov1, prod11, rs11, None)
+            if cov2 is not None:
+                cov2, _ = nngp_ntk_fn(cov2, prod22, rs22, None)
 
-      return nngp, ntk
+        return k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk)
 
-    def nngp_fn_diag(nngp: jnp.ndarray,
-                     r_prods: Sequence[jnp.ndarray]) -> jnp.ndarray:
-      out = jnp.zeros_like(nngp)
-      for l in range(degree):
-        out += r_prods[l]
-      return out
-
-    nngp, ntk = nngp_ntk_fn(nngp, prod12, rs12, ntk)
-
-    if k.diagonal_batch and k.diagonal_spatial:
-      cov1 = nngp_fn_diag(cov1, rs11)
-      if cov2 is not None:
-        cov2 = nngp_fn_diag(cov2, rs22)
-    else:
-      cov1, _ = nngp_ntk_fn(cov1, prod11, rs11)
-      if cov2 is not None:
-        cov2, _ = nngp_ntk_fn(cov2, prod22, rs22)
-
-    k = k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk)
-    return k
-
-  return _elementwise(fn, f'{coef}-polynomial', kernel_fn)
+    return _elementwise(fn, f'{coef.tolist()}-polynomial', kernel_fn)
 
 
 @layer
 @supports_masking(remask_kernel=True)
 def Elementwise(
-    fn: Optional[Callable[[float], float]] = None,
-    nngp_fn: Optional[Callable[[float, float, float], float]] = None,
-    d_nngp_fn: Optional[Callable[[float, float, float], float]] = None
+    fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
+    nngp_fn: Optional[Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]] = None,
+    d_nngp_fn: Optional[Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]] = None
 ) -> InternalLayer:
-  """Elementwise application of `fn` using provided `nngp_fn`.
+    """General elementwise layer given fn and its 2D integral nngp_fn."""
+    if fn is not None:
+        name = getattr(fn, "__name__", "elementwise_fn")
+    elif nngp_fn is not None:
+        name = getattr(nngp_fn, "__name__", "nngp_fn")
+    else:
+        raise ValueError('Provide at least `fn` or `nngp_fn`.')
 
-  Constructs a layer given only scalar-valued nonlinearity / activation
-  `fn` and the 2D integral `nngp_fn`. NTK function is derived automatically in
-  closed form from `nngp_fn`.
+    if nngp_fn is None:
+        kernel_fn = None
+    else:
+        # If derivative not provided, compute via autograd w.r.t. cov12
+        if d_nngp_fn is None:
+            warnings.warn('Using Torch autodiff to compute d/dcov12 nngp_fn for NTK (may affect stability).')
 
-  If you cannot provide the `nngp_fn`, see :obj:`ElementwiseNumerical` to use
-  numerical integration or `nt.monte_carlo.monte_carlo_kernel_fn` to use Monte
-  Carlo sampling.
+            def d_nngp_autograd(c12, v1, v2):
+                return _grad_wrt_cov12(nngp_fn, c12, v1, v2)
+            d_nngp = d_nngp_autograd
+        else:
+            d_nngp = d_nngp_fn
 
-  If your function is implemented separately (e.g. `nt.stax.Relu` etc) it's best
-  to use the custom implementation, since it uses symbolically simplified
-  expressions that are more precise and numerically stable.
+        def kernel_fn(k: Kernel) -> Kernel:
+            cov1, nngp, cov2, ntk = k.cov1, k.nngp, k.cov2, k.ntk
 
-  For details, please see "`Fast Neural Kernel Embeddings for General
-  Activations <https://arxiv.org/abs/2209.04121>`_".
+            var1 = get_diagonal(cov1, k.diagonal_batch, k.diagonal_spatial)
+            var2 = get_diagonal(cov2, k.diagonal_batch, k.diagonal_spatial)
 
-  See Also:
-    `examples/elementwise.py`.
+            if ntk is not None:
+                def d_wrap(c, v1, v2): return d_nngp(c, v1, v2)
+                ntk = ntk * _vmap_2d(d_wrap, nngp, var1, var2, False, k.diagonal_spatial)
 
-  Example:
-    >>> fn = jax.scipy.special.erf  # type: Callable[[float], float]
-    >>> #
-    >>> def nngp_fn(cov12: float, var1: float, var2: float) -> float:
-    >>>   prod = (1 + 2 * var1) * (1 + 2 * var2)
-    >>>   return jnp.arcsin(2 * cov12 / np.sqrt(prod)) * 2 / np.pi
-    >>> #
-    >>> # Use autodiff and vectorization to construct the layer:
-    >>> _, _, kernel_fn_auto = stax.Elementwise(fn, nngp_fn)
-    >>> #
-    >>> # Use custom pre-derived expressions
-    >>> # (should be faster and more numerically stable):
-    >>> _, _, kernel_fn_stax = stax.Erf()
-    >>> #
-    >>> kernel_fn_auto(x1, x2) == kernel_fn_stax(x1, x2)  # usually `True`.
+            def n_wrap(c, v1, v2): return nngp_fn(c, v1, v2)
+            nngp2 = _vmap_2d(n_wrap, nngp, var1, var2, False, k.diagonal_spatial)
 
-  Args:
-    fn:
-      a scalar-input/valued function `fn : R -> R`, the activation /
-      nonlinearity. If `None`, invoking the finite width `apply_fn` will raise
-      an exception.
+            cov1_ = _vmap_2d(n_wrap, cov1, var1, None, k.diagonal_batch, k.diagonal_spatial)
+            cov2_ = None if cov2 is None else _vmap_2d(n_wrap, cov2, var2, None, k.diagonal_batch, k.diagonal_spatial)
 
-    nngp_fn:
-      a scalar-valued function
-      `nngp_fn : (cov12, var1, var2) |-> E[fn(x_1) * fn(x_2)]`, where the
-      expectation is over bivariate normal `x1, x2` with variances `var1`,
-      `var2` and covarianve `cov12`. Needed for both NNGP and NTK calculation.
-      If `None`, invoking infinite width `kernel_fn` will raise an exception.
+            return k.replace(cov1=cov1_, nngp=nngp2, cov2=cov2_, ntk=ntk)
 
-    d_nngp_fn:
-      an optional scalar-valued function
-      `d_nngp_fn : (cov12, var1, var2) |-> E[fn'(x_1) * fn'(x_2)]` with the same
-      `x1, x2` distribution as in `nngp_fn`. If `None`, will be computed using
-      automatic differentiation as `d_nngp_fn = d(nngp_fn)/d(cov12)`, which may
-      lead to worse precision or numerical stability. `nngp_fn` and `d_nngp_fn`
-      are used to derive the closed-form expression for the NTK.
-
-  Returns:
-    `(init_fn, apply_fn, kernel_fn)`.
-
-  Raises:
-    NotImplementedError: if a `fn`/`nngp_fn` is not provided, but `apply_fn`/
-      `kernel_fn` is called respectively.
-  """
-  if fn is not None:
-    name = fn.__name__
-  elif nngp_fn is not None:
-    name = nngp_fn.__name__
-  else:
-    raise ValueError('No finite (`fn`) or infinite (`nngp_fn`) functions '
-                     'provided, the layer will not do anything.')
-
-  if nngp_fn is None:
-    kernel_fn = None
-
-  else:
-    if d_nngp_fn is None:
-      url = 'https://jax.readthedocs.io/en/latest/faq.html#gradients-contain-nan-where-using-where'
-      warnings.warn(
-          f'Using JAX autodiff to compute the `fn` derivative for NTK. Beware '
-          f'of {url}.')
-      d_nngp_fn = jnp.vectorize(grad(nngp_fn))
-
-    def kernel_fn(k: Kernel) -> Kernel:
-      cov1, nngp, cov2, ntk = k.cov1, k.nngp, k.cov2, k.ntk
-
-      var1 = get_diagonal(cov1, k.diagonal_batch, k.diagonal_spatial)
-      var2 = get_diagonal(cov2, k.diagonal_batch, k.diagonal_spatial)
-
-      if ntk is not None:
-        ntk *= _vmap_2d(d_nngp_fn, nngp, var1, var2, False, k.diagonal_spatial)
-
-      nngp = _vmap_2d(nngp_fn, nngp, var1, var2, False, k.diagonal_spatial)
-      cov1 = _vmap_2d(
-          nngp_fn, cov1, var1, None, k.diagonal_batch, k.diagonal_spatial)
-      if cov2 is not None:
-        cov2 = _vmap_2d(
-            nngp_fn, cov2, var2, None, k.diagonal_batch, k.diagonal_spatial)
-      return k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk)
-
-  return _elementwise(fn, name, kernel_fn)
+    return _elementwise(fn, name, kernel_fn)
 
 
 @layer
 @supports_masking(remask_kernel=True)
 def ElementwiseNumerical(
-    fn: Callable[[float], float],
+    fn: Callable[[torch.Tensor], torch.Tensor],
     deg: int,
-    df: Optional[Callable[[float], float]] = None
+    df: Optional[Callable[[torch.Tensor], torch.Tensor]] = None
 ) -> InternalLayer:
-  """Activation function using numerical integration.
-
-  Supports general activation functions using Gauss-Hermite quadrature.
-
-  For details, please see "`Fast Neural Kernel Embeddings for General
-  Activations <https://arxiv.org/abs/2209.04121>`_".
-
-  See Also:
-    `examples/elementwise_numerical.py`.
-
-  Args:
-    fn:
-      activation function.
-
-    deg:
-      number of sample points and weights for quadrature. It must be >= 1.
-      We observe for smooth activations `deg=25` is a good place to start.
-      For non-smooth activation functions (e.g. ReLU, Abs) quadrature is not
-      recommended (for now use `nt.monte_carlo_kernel_fn`). Due to bivariate
-      integration, compute time and memory scale as O(deg**2) for more
-      precision. See eq (13) in
-      https://mathworld.wolfram.com/Hermite-GaussQuadrature.html
-      for error estimates in the case of 1d Gauss-Hermite quadrature.
-
-    df:
-      optional, derivative of the activation function (`fn`). If not provided,
-      it is computed by `jax.grad`. Providing analytic derivative can speed up
-      the NTK computations.
-
-  Returns:
-    `(init_fn, apply_fn, kernel_fn)`.
-  """
-  warnings.warn(
-      f'Numerical Activation Layer with fn={fn}, deg={deg} used!'
-      'Note that numerical error is controlled by `deg` and for a given'
-      'tolerance level, required `deg` will highly be dependent on the choice'
-      'of `fn`.')
-
-  quad_points = sp.special.roots_hermite(deg)
-
-  if df is None:
-    url = 'https://jax.readthedocs.io/en/latest/faq.html#gradients-contain-nan-where-using-where'
+    """Numerical Gauss–Hermite quadrature for general activations."""
     warnings.warn(
-        f'Using JAX autodiff to compute the `fn` derivative for NTK. Beware of '
-        f'{url}.')
-    df = jnp.vectorize(grad(fn))
+        f'Numerical Activation Layer with fn={fn}, deg={deg}. Accuracy depends on `deg` and smoothness of `fn`.'
+    )
 
-  def kernel_fn(k: Kernel) -> Kernel:
-    """Kernel transformation of activation function using quadrature."""
-    cov1, nngp, cov2, ntk = k.cov1, k.nngp, k.cov2, k.ntk
+    # Use numpy.polynomial.hermite.hermgauss to avoid SciPy dependency
+    xs_np, ws_np = np.polynomial.hermite.hermgauss(deg)
+    xs = torch.as_tensor(xs_np, dtype=torch.get_default_dtype())
+    ws = torch.as_tensor(ws_np, dtype=torch.get_default_dtype())
 
-    d1 = get_diagonal(cov1, k.diagonal_batch, k.diagonal_spatial)
-    d2 = get_diagonal(cov2, k.diagonal_batch, k.diagonal_spatial)
+    if df is None:
+        warnings.warn('Using Torch autodiff to get df for NTK; provide `df` for speed/stability.')
+        def df(x: torch.Tensor) -> torch.Tensor:  # type: ignore[no-redef]
+            x_req = x.detach().requires_grad_(True)
+            y = fn(x_req)
+            (g,) = torch.autograd.grad(y.sum(), x_req, retain_graph=False, create_graph=False)
+            return g
 
-    end_axis = 1 if k.diagonal_spatial else cov1.ndim
-    q11 = utils.interleave_ones(d1, 0, end_axis, True)
-    q22 = utils.interleave_ones(d1 if d2 is None else d2, 0, end_axis, False)
+    def kernel_fn(k: Kernel) -> Kernel:
+        cov1, nngp, cov2, ntk = k.cov1, k.nngp, k.cov2, k.ntk
 
-    def nngp_ntk_fn(nngp, q11, q22, ntk=None):
-      """Simple Gauss-Hermite quadrature routine."""
-      xs, ws = quad_points
-      grid = jnp.outer(ws, ws)
-      x = xs.reshape((xs.shape[0],) + (1,) * (nngp.ndim + 1))
-      y = xs.reshape((1, xs.shape[0]) + (1,) * nngp.ndim)
-      xy_axes = (0, 1)
+        d1 = get_diagonal(cov1, k.diagonal_batch, k.diagonal_spatial)
+        d2 = get_diagonal(cov2, k.diagonal_batch, k.diagonal_spatial)
 
-      nngp = jnp.expand_dims(nngp, xy_axes)
-      q11, q22 = jnp.expand_dims(q11, xy_axes), jnp.expand_dims(q22, xy_axes)
+        end_axis = 1 if k.diagonal_spatial else cov1.ndim
+        q11 = utils.interleave_ones(d1, 0, end_axis, True)
+        q22 = utils.interleave_ones(d1 if d2 is None else d2, 0, end_axis, False)
 
-      def integrate(f):
-        fvals = f(_sqrt(2 * q11) * x) * f(  # pytype: disable=wrong-arg-types  # jnp-type
-            nngp / _sqrt(q11 / 2, 1e-30) * x + _sqrt(
-                2*(q22 - nngp**2/q11)) * y)
-        return jnp.tensordot(grid, fvals, (xy_axes, xy_axes)) / jnp.pi
+        def nngp_ntk_fn(nngp, q11, q22, ntk=None):
+            # Build quadrature grid
+            grid = torch.outer(ws, ws)  # (deg, deg)
+            x = xs.view(xs.shape[0], *([1] * (nngp.ndim + 1)))
+            y = xs.view(1, xs.shape[0], *([1] * nngp.ndim))
+            xy_axes = (0, 1)
 
-      if ntk is not None:
-        ntk *= integrate(df)
-      nngp = integrate(fn)
-      return nngp, ntk
+            nngp_e = nngp.unsqueeze(0).unsqueeze(0)
+            q11_e = q11.unsqueeze(0).unsqueeze(0)
+            q22_e = q22.unsqueeze(0).unsqueeze(0)
 
-    def nngp_fn_diag(nngp):
-      xs, ws = quad_points
-      x = xs.reshape((xs.shape[0],) + (1,) * nngp.ndim)
-      x_axes = (0,)
-      nngp = jnp.expand_dims(nngp, x_axes)
-      fval = fn(_sqrt(2 * nngp) * x) ** 2
-      return jnp.tensordot(ws, fval, (x_axes, x_axes)) / jnp.sqrt(jnp.pi)
+            def integrate(f: Callable[[torch.Tensor], torch.Tensor]) -> torch.Tensor:
+                # fvals shape (deg, deg, ...)
+                fvals = f(_sqrt(2 * q11_e) * x) * (
+                    f(nngp_e / _sqrt(q11_e / 2, 1e-30) * x + _sqrt(2 * (q22_e - nngp_e**2 / q11_e), 1e-30) * y)
+                )
+                # tensordot over the first two axes with the grid weights
+                out = (grid.unsqueeze(-1) * fvals).sum(dim=xy_axes) / math.pi
+                return out
 
-    nngp, ntk = nngp_ntk_fn(nngp, q11, q22, ntk)
+            if ntk is not None:
+                ntk = ntk * integrate(df)
+            new_nngp = integrate(fn)
+            return new_nngp, ntk
 
-    if k.diagonal_batch and k.diagonal_spatial:
-      cov1 = nngp_fn_diag(cov1)
-      if cov2 is not None:
-        cov2 = nngp_fn_diag(cov2)
+        def nngp_fn_diag(v):
+            x = xs.view(xs.shape[0], *([1] * v.ndim))
+            v_e = v.unsqueeze(0)
+            fval = fn(_sqrt(2 * v_e) * x) ** 2
+            return (ws.view(-1, *([1] * v.ndim)) * fval).sum(dim=0) / math.sqrt(math.pi)
 
-    else:
-      start_axis = 1 if k.diagonal_batch else 0
-      q11 = utils.interleave_ones(d1, start_axis, end_axis, True)
-      q22 = utils.interleave_ones(d1, start_axis, end_axis, False)
-      cov1, _ = nngp_ntk_fn(cov1, q11, q22)
+        nngp, ntk = nngp_ntk_fn(nngp, q11, q22, ntk)
 
-      if cov2 is not None:
-        q11 = utils.interleave_ones(d2, start_axis, end_axis, True)
-        q22 = utils.interleave_ones(d2, start_axis, end_axis, False)
-        cov2, _ = nngp_ntk_fn(cov2, q11, q22)
+        if k.diagonal_batch and k.diagonal_spatial:
+            cov1 = nngp_fn_diag(cov1)
+            if cov2 is not None:
+                cov2 = nngp_fn_diag(cov2)
+        else:
+            start_axis = 1 if k.diagonal_batch else 0
+            q11 = utils.interleave_ones(d1, start_axis, end_axis, True)
+            q22 = utils.interleave_ones(d1, start_axis, end_axis, False)
+            cov1, _ = nngp_ntk_fn(cov1, q11, q22, None)
 
-    return k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk)
+            if cov2 is not None:
+                q11 = utils.interleave_ones(d2, start_axis, end_axis, True)
+                q22 = utils.interleave_ones(d2, start_axis, end_axis, False)
+                cov2, _ = nngp_ntk_fn(cov2, q11, q22, None)
 
-  return _elementwise(fn, f'ElementwiseNumerical({fn},deg={deg})', kernel_fn)
+        return k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk)
 
-
-def _elementwise(
-    fn: Optional[Callable[[float], float]],
-    name: str,
-    kernel_fn: Optional[LayerKernelFn],
-) -> InternalLayer:
-  init_fn = lambda rng, input_shape: (input_shape, ())
-
-  def apply_fn(params, inputs, **kwargs):
-    if fn is None:
-      raise NotImplementedError(fn)
-    return fn(inputs)
-
-  @requires(diagonal_spatial=Diagonal())
-  def new_kernel_fn(k: Kernel, **kwargs) -> Kernel:
-    if kernel_fn is None:
-      raise NotImplementedError(kernel_fn)
-
-    if not k.is_gaussian:
-      raise ValueError('The input to the activation function must be Gaussian, '
-                       'i.e. a random affine transform is required before the '
-                       'activation function.')
-    k = kernel_fn(k)
-    return k.replace(is_gaussian=False)
-
-  init_fn.__name__ = apply_fn.__name__ = new_kernel_fn.__name__ = name
-  return init_fn, apply_fn, new_kernel_fn
-
-
-@functools.partial(custom_jvp, nondiff_argnums=(1,))
-def _sqrt(x, tol=0.):
-  return jnp.sqrt(jnp.maximum(x, tol))
-
-
-@getattr(_sqrt, 'defjvp', lambda f: f)  # ReadTheDocs-friendly `@_sqrt.defjvp`.
-def _sqrt_jvp(tol, primals, tangents):
-  x, = primals
-  x_dot, = tangents
-  safe_tol = max(tol, 1e-30)
-  square_root = _sqrt(x, safe_tol)
-  square_root_out = _sqrt(x, tol)
-  return square_root_out, jnp.where(x > safe_tol, x_dot / (2 * square_root), 0.)
-
-
-@functools.partial(custom_jvp, nondiff_argnums=(2,))
-def _arctan2(x, y, fill_zero: Optional[float] = None):
-  if fill_zero is not None:
-    return jnp.where(jnp.bitwise_and(x == 0., y == 0.),
-                     fill_zero,
-                     jnp.arctan2(x, y))
-  return jnp.arctan2(x, y)
-
-
-@getattr(_arctan2, 'defjvp', lambda f: f)  # Equivalent to `@_arctan2.defjvp`.
-def _arctan2_jvp(fill_zero, primals, tangents):
-  x, y = primals
-  x_dot, y_dot = tangents
-  primal_out = _arctan2(x, y, fill_zero)
-  safe_tol = 1e-30
-  denom = jnp.maximum(x ** 2 + y ** 2, safe_tol)
-  tangent_out = x_dot * (y / denom) - y_dot * (x / denom)
-  return primal_out, tangent_out
-
-
-def _vmap_2d(
-    fn: Callable[[float, float, float], float],
-    cov12: jnp.ndarray,
-    var1: jnp.ndarray,
-    var2: Optional[jnp.ndarray],
-    diagonal_batch: bool,
-    diagonal_spatial: bool
-) -> jnp.ndarray:
-  """Effectively a "2D vmap" of `fn(cov12, var1, var2)`.
-
-  Applicable for all possible kernel layouts.
-
-  Args:
-    fn:
-      scalar-valued, elementwise `fn(cov12, var1, var2)` function to apply.
-
-    cov12:
-      covariance tensor (`q12`), `nngp`/`ntk`/`cov1`/`cov2`, of shape
-      `(N1[, N2])`, `(N1[, N2], X, Y, ...)`, `(N1[, N2], X, X, Y, Y, ...)`
-      depending on `diagonal_batch`, `diagonal_spatial`, and the number of
-      spatial dimensions.
-
-    var1:
-      variance tensor (`q11`), has shape `(N1[, X, Y, ...])`.
-
-    var2:
-      variance tensor (`q22`), has shape `(N1[, X, Y, ...])`.
-
-    diagonal_batch:
-      `True` if `cov12` has only one batch dimension.
-
-    diagonal_spatial:
-      `True` if `cov12` has spatial dimensions appearing once (vs twice).
-
-  Returns:
-    Resulting array `[fn(cov12[i, j], var1[i], var2[j])]_{i j}`. Has the same
-    shape as `cov12`.
-  """
-  batch_ndim = 1 if diagonal_batch else 2
-  start = 2 - batch_ndim
-  cov_end = batch_ndim if diagonal_spatial else cov12.ndim
-  _cov12 = utils.make_2d(cov12, start, cov_end)
-
-  var_end = 1 if diagonal_spatial else var1.ndim
-  var1 = var1.reshape(var1.shape[:start] + (-1,) + var1.shape[var_end:])
-  var2 = var1 if var2 is None else var2.reshape(var2.shape[:start] + (-1,) +
-                                                var2.shape[var_end:])
-
-  fn = vmap(
-      vmap(
-          jnp.vectorize(fn),
-          in_axes=(start, None, start),
-          out_axes=start
-      ),
-      in_axes=(start, start, None),
-      out_axes=start
-  )
-  out = fn(_cov12, var1, var2)  # type: jnp.ndarray
-  out_shape = (cov12.shape[:start] +
-               cov12.shape[start:cov_end:2] +
-               cov12.shape[start + 1:cov_end:2] +
-               cov12.shape[cov_end:])
-  out = out.reshape(out_shape)
-  out = utils.zip_axes(out, start, cov_end)
-  return out
-
-
-def _factorial(n: int) -> int:
-  return functools.reduce(op.mul, range(1, n + 1), 1)
-
-
-def _double_factorial(n: int) -> int:
-  return functools.reduce(op.mul, range(n, 0, -2), 1)
+    return _elementwise(fn, f'ElementwiseNumerical({getattr(fn, "__name__", "fn")},deg={deg})', kernel_fn)
