@@ -523,7 +523,7 @@ def _GlobalPool(pool_type: _Pooling, batch_axis: int, channel_axis: int) -> Inte
         return k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk,
                          batch_axis=0, channel_axis=1, is_reversed=False)
     def mask_fn(mask: torch.Tensor, input_shape: Tuple[int, ...]):
-        # all spatial dims aggregated -> mask reduces to (N, C, 1...)->(N,C)
+        # all spatial dims aggregateaggregated -> mask reduces to (N, C, 1...)->(N,C)
         dims = tuple(range(2, mask.ndim))
         return torch.all(mask, dim=dims)
     return init_fn, apply_fn, kernel_fn, mask_fn

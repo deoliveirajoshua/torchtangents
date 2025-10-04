@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=65", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "torchtangents"
+version = "0.0.0"
+description = "PyTorch port of Neural Tangents"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = ["torch>=2.1"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["torchtangents*"]
