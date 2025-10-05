@@ -341,6 +341,7 @@ def _zip_axes(
     odd_axes = range(start_axis + 1, end_axis, 2)
     last_axes = range(end_axis - half_ndim, end_axis)
 
+    print(f"odd_axes = {list(odd_axes)}, last_axes = {list(last_axes)}")
     if unzip:
         x = torch.movedim(x, odd_axes, last_axes)
     else:

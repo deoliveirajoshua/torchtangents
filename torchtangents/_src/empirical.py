@@ -165,7 +165,11 @@ def _jacobian_contraction_ntk_fn(
             a_flat = a.reshape(a.shape[:fx_ndim] + (-1,))
             b_flat = b.reshape(b.shape[:fx_ndim] + (-1,))
             # einsum over last dim
-            core = torch.einsum("...p,...p->...", a_flat, b_flat)
+            # a_flat: [N1, C, P], b_flat: [N2, C, P]
+            core = torch.einsum("n c p, m d p -> n m c d", a_flat, b_flat)
+            print(f"core shape: {core.shape}")
+            # core: [N1, N2, C, C]
+
             return core
 
         contracted = tree_reduce_add(tree_map(leaf_contract, j1, j2))
@@ -437,8 +441,11 @@ def _trace_and_diagonal(
         axis2 = output_ndim + d - 2 * i - len(trace_axes_)
         ntk = torch.diagonal(ntk, dim1=axis1, dim2=axis2)
 
-    # Interleave/move axes to match original convention
-    ntk = utils.zip_axes(ntk, 0, ntk.ndim - n_diag)
+    if n_diag == 0:
+        return ntk / contract_size
+
+    endaxis = ntk.ndim - n_diag
+    ntk = utils.zip_axes(ntk, 0, endaxis)
     res_diagonal_axes = _get_res_batch_dims(trace_axes_, diagonal_axes_)
     ntk = ntk.movedim(list(range(ntk.ndim - n_diag, ntk.ndim)), res_diagonal_axes)
     return ntk / contract_size

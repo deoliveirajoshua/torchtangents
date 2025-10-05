@@ -36,7 +36,7 @@ def main():
     device = "cpu"
     torch.manual_seed(0)
 
-    N_train, N_test, D, H, C = 4, 2, 32, 64, 4
+    N_train, N_test, D, H, C = 4, 2, 32, 64, 10
     x_train = torch.randn(N_train, D, device=device)
     x_test  = torch.randn(N_test,  D, device=device)
     params  = init_mlp(1234, D, H, C, device)
@@ -57,9 +57,14 @@ def main():
     uncompiled_ntk  = lambda a,b: ntk_fn(a,b,params, training=False)
     print("Warming up uncompiled kernels...")
     K_nngp_tt = uncompiled_nngp(x_test,  None)
+    print(K_nngp_tt.shape)
+    print(K_nngp_tt)
     K_ntk_tt = uncompiled_ntk(x_test,  None)
+    print(K_ntk_tt.shape)
+    print(K_ntk_tt)
     K_ntk_tr = uncompiled_ntk(x_test,  x_train)
-    print("Done.")
+    print(K_ntk_tr.shape)
+    print(K_ntk_tr)
 
     # Optional: compile the kernel fns. (PyTorch 2.1+)
     compiled_nngp = torch.compile(lambda a,b: nngp_fn(a,b,params, training=False))
