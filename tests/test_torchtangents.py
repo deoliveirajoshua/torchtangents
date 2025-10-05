@@ -3,14 +3,7 @@ import math
 import torch
 from torch import nn, Tensor
 
-# assume you exposed your port as "torchtangents"
-from torchtangents.empirical import (
-    empirical_kernel_fn,
-    empirical_ntk_fn,
-    empirical_nngp_fn,
-    empirical_ntk_vp_fn,
-    NtkImplementation,
-)
+from torchtangents import empirical_kernel_fn, empirical_ntk_fn, empirical_nngp_fn, empirical_ntk_vp_fn, NtkImplementation
 
 # ---- tiny functional MLP -----------------------------------------------------
 def init_mlp(key: int, in_dim: int, hidden: int, out_dim: int, device):
@@ -39,10 +32,11 @@ def f(params, x: Tensor, *, training: bool = False) -> Tensor:
 
 # ---- main --------------------------------------------------------------------
 def main():
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    #device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cpu"
     torch.manual_seed(0)
 
-    N_train, N_test, D, H, C = 16, 8, 32, 64, 10
+    N_train, N_test, D, H, C = 4, 2, 32, 64, 4
     x_train = torch.randn(N_train, D, device=device)
     x_test  = torch.randn(N_test,  D, device=device)
     params  = init_mlp(1234, D, H, C, device)
@@ -57,6 +51,15 @@ def main():
         f, trace_axes=trace_axes, diagonal_axes=diagonal_axes,
         vmap_axes=0, implementation=NtkImplementation.JACOBIAN_CONTRACTION
     )
+
+    # -- compile kernels without compilation (for comparison) ---
+    uncompiled_nngp = lambda a,b: nngp_fn(a,b,params, training=False)
+    uncompiled_ntk  = lambda a,b: ntk_fn(a,b,params, training=False)
+    print("Warming up uncompiled kernels...")
+    K_nngp_tt = uncompiled_nngp(x_test,  None)
+    K_ntk_tt = uncompiled_ntk(x_test,  None)
+    K_ntk_tr = uncompiled_ntk(x_test,  x_train)
+    print("Done.")
 
     # Optional: compile the kernel fns. (PyTorch 2.1+)
     compiled_nngp = torch.compile(lambda a,b: nngp_fn(a,b,params, training=False))

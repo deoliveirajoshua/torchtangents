@@ -11,8 +11,8 @@ import numpy as np
 import torch
 
 from .utils import utils
-from .kernel import Kernel
-from .typing import KernelFn, NTTree   # optional: mirror type aliases
+from .utils.kernel import Kernel
+from .utils.typing import KernelFn, NTTree   # optional: mirror type aliases
 
 _KernelFn = TypeVar('_KernelFn', bound=KernelFn)
 
