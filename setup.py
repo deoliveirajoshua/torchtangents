@@ -9,6 +9,10 @@ setup(
     python_requires=">=3.9",
     install_requires=[
         "torch>=2.1",
+        "numpy",
+        "frozendict",
+        "absl-py",
+        "parameterized"
     ],
     packages=find_packages(
         where=".",

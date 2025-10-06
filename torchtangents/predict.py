@@ -19,9 +19,7 @@ from ._src.predict import (
     gradient_descent_mse,
     gradient_descent_mse_ensemble,
     gp_inference,
-
     max_learning_rate,
-
     ODEState,
     Gaussian
 )
