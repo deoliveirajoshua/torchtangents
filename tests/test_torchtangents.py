@@ -32,8 +32,9 @@ def f(params, x: Tensor, *, training: bool = False) -> Tensor:
 
 # ---- main --------------------------------------------------------------------
 def main():
-    #device = "cuda" if torch.cuda.is_available() else "cpu"
-    device = "cpu"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if device == "cuda":
+        _ = torch.empty(0, device='cuda')
     torch.manual_seed(0)
 
     N_train, N_test, D, H, C = 4, 2, 32, 64, 10
@@ -57,15 +58,10 @@ def main():
     uncompiled_ntk  = lambda a,b: ntk_fn(a,b,params, training=False)
     print("Warming up uncompiled kernels...")
     K_nngp_tt = uncompiled_nngp(x_test,  None)
-    print(K_nngp_tt.shape)
-    print(K_nngp_tt)
     K_ntk_tt = uncompiled_ntk(x_test,  None)
-    print(K_ntk_tt.shape)
-    print(K_ntk_tt)
     K_ntk_tr = uncompiled_ntk(x_test,  x_train)
-    print(K_ntk_tr.shape)
-    print(K_ntk_tr)
 
+    '''
     # Optional: compile the kernel fns. (PyTorch 2.1+)
     compiled_nngp = torch.compile(lambda a,b: nngp_fn(a,b,params, training=False))
     compiled_ntk  = torch.compile(lambda a,b: ntk_fn(a,b,params, training=False))
@@ -74,6 +70,7 @@ def main():
     K_nngp_tt = compiled_nngp(x_test,  None)     # test-test NNGP (vs itself)
     K_ntk_tt  = compiled_ntk (x_test,  None)     # test-test NTK
     K_ntk_tr  = compiled_ntk (x_test,  x_train)  # test-train NTK
+    '''
 
     print("NNGP(test,test) shape:", tuple(K_nngp_tt.shape))
     print("NTK (test,test) shape:", tuple(K_ntk_tt.shape))
@@ -98,8 +95,8 @@ def main():
     vp_err = (Kv_vp - Kv_mat).abs().max().item()
     print(f"NTK-vp agreement |J J^T v - K v|_max = {vp_err:.3e}")
     assert vp_err < 5e-3, "Vector-product path should match dense kernel action."
-
     print("✓ torchtangents basic test passed.")
+
 
 if __name__ == "__main__":
     main()

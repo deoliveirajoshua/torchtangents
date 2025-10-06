@@ -166,8 +166,9 @@ def _jacobian_contraction_ntk_fn(
             b_flat = b.reshape(b.shape[:fx_ndim] + (-1,))
             # einsum over last dim
             # a_flat: [N1, C, P], b_flat: [N2, C, P]
-            core = torch.einsum("n c p, m d p -> n m c d", a_flat, b_flat)
-            print(f"core shape: {core.shape}")
+            #print(f"a_flat shape: {a_flat.shape}, b_flat shape: {b_flat.shape}")
+            core = torch.einsum("n c p, m d p -> n c m d", a_flat, b_flat)
+            #print(f"core shape: {core.shape}")
             # core: [N1, N2, C, C]
 
             return core
@@ -414,41 +415,78 @@ def empirical_ntk_vp_fn(
 # -----------------
 
 def _trace_and_diagonal(
-    ntk: Tensor,
-    trace_axes: Axes,
-    diagonal_axes: Axes
-) -> Tensor:
+    ntk: torch.Tensor,
+    trace_axes: tuple[int, ...],
+    diagonal_axes: tuple[int, ...],
+) -> torch.Tensor:
     """
-    Extract traces/diagonals along respective pairs of axes from an even-rank tensor.
+    Input layout: [N1, N2, <feature axes left half>, <feature axes right half>]
+    (i.e., halves are NOT interleaved). Only trace/diag over the feature block.
+
+    With fx of shape [N, C], this means input is [N1, N2, C, C].
     """
-    if ntk.ndim % 2 == 1:
+    if ntk.ndim % 2 != 0:
         raise ValueError("Expected an even-dimensional kernel.")
 
-    output_ndim = ntk.ndim // 2
-    trace_axes_ = utils.canonicalize_axis(trace_axes, (0,) * output_ndim)
-    diagonal_axes_ = utils.canonicalize_axis(diagonal_axes, (0,) * output_ndim)
+    half = ntk.ndim // 2
+    BATCH_NDIMS = 1  # number of example axes per half (here: just N)
+    feat_ndim = half - BATCH_NDIMS
+    if feat_ndim < 0:
+        raise ValueError("Invalid layout: half < BATCH_NDIMS.")
+    if feat_ndim == 0:
+        # No feature axes remain: nothing to trace/diag.
+        return ntk
 
-    n_diag = len(diagonal_axes_)
-    contract_size = utils.size_at(ntk.shape[:output_ndim], trace_axes_)
+    # Canonicalize trace/diag indices RELATIVE TO THE FEATURE BLOCK length (feat_ndim),
+    # not relative to the whole half. This makes -1 mean "last FEATURE axis".
+    def _canon_feat(axes):
+        if axes is None:
+            return ()
+        out = []
+        for a in axes:
+            a = a if a >= 0 else feat_ndim + a
+            if not (0 <= a < feat_ndim):
+                raise IndexError(f"feature axis {a} out of range for feat_ndim={feat_ndim}")
+            out.append(a)
+        return tuple(out)
 
-    # trace over each pair
-    for i, c in enumerate(sorted(trace_axes_)):
-        ntk = ntk.diagonal(dim1=c, dim2=output_ndim + c - i).sum(-1)
+    trace_feat = _canon_feat(trace_axes)          # e.g. (-1,) -> (0,) when feat_ndim == 1
+    diag_feat  = _canon_feat(diagonal_axes)
 
-    # take diagonals for requested pairs
-    for i, d in enumerate(sorted(diagonal_axes_)):
+    # Map feature-relative index a to absolute axis in first half:
+    # [N1, <feat...>]  ⇒ absolute = BATCH_NDIMS + a
+    trace_abs = tuple(BATCH_NDIMS + a for a in trace_feat)
+    diag_abs  = tuple(BATCH_NDIMS + a for a in diag_feat)
+
+    # Normalization factor = product of sizes of traced feature axes (first half).
+    contract_size = 1
+    for a in trace_abs:
+        contract_size *= ntk.shape[a]
+
+    # --- Trace over requested feature pairs ---
+    # Pair absolute axis a with its counterpart in second half: (a, half + a)
+    for i, a in enumerate(sorted(trace_abs)):
+        ntk = ntk.diagonal(dim1=a, dim2=half + a - i).sum(-1)
+
+    # --- Take diagonals over requested feature pairs ---
+    for i, d in enumerate(sorted(diag_abs)):
         axis1 = d - i
-        axis2 = output_ndim + d - 2 * i - len(trace_axes_)
+        axis2 = half + d - (2 * i) - len(trace_abs)
         ntk = torch.diagonal(ntk, dim1=axis1, dim2=axis2)
 
-    if n_diag == 0:
-        return ntk / contract_size
+    # No zipping/interleaving for 2D blocks; guard larger cases too.
+    n_diag = len(diag_abs)
+    end_axis = ntk.ndim - n_diag
+    if end_axis > 2:
+        ntk = utils.zip_axes(ntk, 0, end_axis)  # ensure this routine has the no-op + tuple fixes
 
-    endaxis = ntk.ndim - n_diag
-    ntk = utils.zip_axes(ntk, 0, endaxis)
-    res_diagonal_axes = _get_res_batch_dims(trace_axes_, diagonal_axes_)
-    ntk = ntk.movedim(list(range(ntk.ndim - n_diag, ntk.ndim)), res_diagonal_axes)
+    # Move extracted diagonals, if any (n_diag==0 in your test, so this is skipped)
+    if n_diag > 0:
+        res_diagonal_axes = _get_res_batch_dims(trace_abs, diag_abs)
+        ntk = ntk.movedim(list(range(ntk.ndim - n_diag, ntk.ndim)), res_diagonal_axes)
+
     return ntk / contract_size
+
 
 
 def _dict_of_tree_to_tree_of_dict(out_dict: Dict[str, PyTree], get: Tuple[str, ...]) -> PyTree:
