@@ -5,9 +5,14 @@ from turtledemo.penrose import start
 import torch
 from torch import nn, Tensor
 
+import inspect, torch
+from torch.utils import _pytree as pytree
+print(torch.__version__)
 from torchtangents import empirical_kernel_fn, empirical_ntk_fn, empirical_nngp_fn, empirical_ntk_vp_fn, NtkImplementation
 
-# ---- tiny functional MLP -----------------------------------------------------
+test_compiled = False
+
+
 # ---- tiny functional MLP -----------------------------------------------------
 def init_mlp(key: int, in_dim: int, hidden: int, out_dim: int, device):
     g = torch.Generator(device=device).manual_seed(key)
@@ -72,43 +77,44 @@ def main():
     uncompiled_nngp = lambda a,b: nngp_fn(a,b,params, training=False)
     uncompiled_ntk  = lambda a,b: ntk_fn(a,b,params, training=False)
     print("Warming up uncompiled kernels...")
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    start.record()
+    if device != "cpu": start = torch.cuda.Event(enable_timing=True)
+    if device != "cpu": end = torch.cuda.Event(enable_timing=True)
+    if device != "cpu": start.record()
     K_nngp_tt = uncompiled_nngp(x_test,  None)
-    end.record()
-    torch.cuda.synchronize()
-    print(f"NNGP kernel computed in {start.elapsed_time(end):.1f} ms")
-    start.record()
+    if device != "cpu": end.record()
+    if device != "cpu": torch.cuda.synchronize()
+    if device != "cpu": print(f"NNGP kernel computed in {start.elapsed_time(end):.1f} ms")
+    if device != "cpu": start.record()
     K_ntk_tt = uncompiled_ntk(x_test,  None)
-    end.record()
-    torch.cuda.synchronize()
-    print(f"NTK  kernel computed in {start.elapsed_time(end):.1f} ms")
-    start.record()
+    if device != "cpu": end.record()
+    if device != "cpu": torch.cuda.synchronize()
+    if device != "cpu": print(f"NTK  kernel computed in {start.elapsed_time(end):.1f} ms")
+    if device != "cpu": start.record()
     K_ntk_tr = uncompiled_ntk(x_test,  x_train)
-    end.record()
-    torch.cuda.synchronize()
-    print(f"NTK  kernel computed in {start.elapsed_time(end):.1f} ms")
+    if device != "cpu": end.record()
+    if device != "cpu": torch.cuda.synchronize()
+    if device != "cpu": print(f"NTK  kernel computed in {start.elapsed_time(end):.1f} ms")
     # Optional: compile the kernel fns. (PyTorch 2.1+)
     compiled_nngp = torch.compile(lambda a,b: nngp_fn(a,b,params, training=False))
     compiled_ntk  = torch.compile(lambda a,b: ntk_fn(a,b,params, training=False))
 
     # --- compute kernels ---
-    start.record()
-    K_nngp_tt = compiled_nngp(x_test,  None)     # test-test NNGP (vs itself)
-    end.record()
-    torch.cuda.synchronize()
-    print(f"NNGP kernel computed in {start.elapsed_time(end):.1f} ms")
-    start.record()
-    K_ntk_tt  = compiled_ntk (x_test,  None)     # test-test NTK
-    end.record()
-    torch.cuda.synchronize()
-    print(f"NTK  kernel computed in {start.elapsed_time(end):.1f} ms")
-    start.record()
-    K_ntk_tr  = compiled_ntk (x_test,  x_train)  # test-train NTK
-    end.record()
-    torch.cuda.synchronize()
-    print(f"NTK  kernel computed in {start.elapsed_time(end):.1f} ms")
+    if test_compiled:
+        start.record()
+        K_nngp_tt = compiled_nngp(x_test,  None)     # test-test NNGP (vs itself)
+        end.record()
+        torch.cuda.synchronize()
+        print(f"NNGP kernel computed in {start.elapsed_time(end):.1f} ms")
+        start.record()
+        K_ntk_tt  = compiled_ntk (x_test,  None)     # test-test NTK
+        end.record()
+        torch.cuda.synchronize()
+        print(f"NTK  kernel computed in {start.elapsed_time(end):.1f} ms")
+        start.record()
+        K_ntk_tr  = compiled_ntk (x_test,  x_train)  # test-train NTK
+        end.record()
+        torch.cuda.synchronize()
+        print(f"NTK  kernel computed in {start.elapsed_time(end):.1f} ms")
 
     print("NNGP(test,test) shape:", tuple(K_nngp_tt.shape))
     print("NTK (test,test) shape:", tuple(K_ntk_tt.shape))
