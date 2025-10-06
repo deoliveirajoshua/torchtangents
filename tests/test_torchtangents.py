@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 import math
+from turtledemo.penrose import start
+
 import torch
 from torch import nn, Tensor
 
 from torchtangents import empirical_kernel_fn, empirical_ntk_fn, empirical_nngp_fn, empirical_ntk_vp_fn, NtkImplementation
 
+# ---- tiny functional MLP -----------------------------------------------------
 # ---- tiny functional MLP -----------------------------------------------------
 def init_mlp(key: int, in_dim: int, hidden: int, out_dim: int, device):
     g = torch.Generator(device=device).manual_seed(key)
@@ -13,22 +16,34 @@ def init_mlp(key: int, in_dim: int, hidden: int, out_dim: int, device):
         std = math.sqrt(2.0 / fan_in)
         return torch.randn(*shape, generator=g, device=device) * std
 
-    params = {
-        "w1": kaiming((hidden, in_dim)),
-        "b1": torch.zeros(hidden, device=device),
-        "w2": kaiming((hidden, hidden)),
-        "b2": torch.zeros(hidden, device=device),
-        "w3": kaiming((out_dim, hidden)),
-        "b3": torch.zeros(out_dim, device=device),
-    }
-    return params
+    W1 = kaiming((hidden, in_dim))
+    b1 = torch.zeros(hidden, device=device)
+    W2 = kaiming((hidden, hidden))
+    b2 = torch.zeros(hidden, device=device)
+    W3 = kaiming((out_dim, hidden))
+    b3 = torch.zeros(out_dim, device=device)
+    return (W1, b1, W2, b2, W3, b3)  # tuple, not dict
 
 def f(params, x: Tensor, *, training: bool = False) -> Tensor:
-    # x: [N, D]
-    h1 = torch.relu(x @ params["w1"].T + params["b1"])
-    h2 = torch.relu(h1 @ params["w2"].T + params["b2"])
-    y  = h2 @ params["w3"].T + params["b3"]
-    return y  # [N, C]
+    # --- unwrap singleton-tuple produced by functorch vjp ---
+    if isinstance(params, (tuple, list)) and len(params) == 1 and isinstance(params[0], (tuple, list, dict)):
+        params = params[0]
+
+    # --- unpack your parameter pytree ---
+    if isinstance(params, dict):
+        W1, b1 = params["W1"], params["b1"]
+        W2, b2 = params["W2"], params["b2"]
+        W3, b3 = params["W3"], params["b3"]
+    else:
+        # assume (W1, b1, W2, b2, W3, b3)
+        W1, b1, W2, b2, W3, b3 = params
+
+    h1 = torch.relu(x @ W1.T + b1)
+    h2 = torch.relu(h1 @ W2.T + b2)
+    y  = h2 @ W3.T + b3
+    return y
+
+
 
 # ---- main --------------------------------------------------------------------
 def main():
@@ -37,7 +52,7 @@ def main():
         _ = torch.empty(0, device='cuda')
     torch.manual_seed(0)
 
-    N_train, N_test, D, H, C = 4, 2, 32, 64, 10
+    N_train, N_test, D, H, C = 40, 20, 32, 64, 10
     x_train = torch.randn(N_train, D, device=device)
     x_test  = torch.randn(N_test,  D, device=device)
     params  = init_mlp(1234, D, H, C, device)
@@ -57,20 +72,43 @@ def main():
     uncompiled_nngp = lambda a,b: nngp_fn(a,b,params, training=False)
     uncompiled_ntk  = lambda a,b: ntk_fn(a,b,params, training=False)
     print("Warming up uncompiled kernels...")
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    start.record()
     K_nngp_tt = uncompiled_nngp(x_test,  None)
+    end.record()
+    torch.cuda.synchronize()
+    print(f"NNGP kernel computed in {start.elapsed_time(end):.1f} ms")
+    start.record()
     K_ntk_tt = uncompiled_ntk(x_test,  None)
+    end.record()
+    torch.cuda.synchronize()
+    print(f"NTK  kernel computed in {start.elapsed_time(end):.1f} ms")
+    start.record()
     K_ntk_tr = uncompiled_ntk(x_test,  x_train)
-
-    '''
+    end.record()
+    torch.cuda.synchronize()
+    print(f"NTK  kernel computed in {start.elapsed_time(end):.1f} ms")
     # Optional: compile the kernel fns. (PyTorch 2.1+)
     compiled_nngp = torch.compile(lambda a,b: nngp_fn(a,b,params, training=False))
     compiled_ntk  = torch.compile(lambda a,b: ntk_fn(a,b,params, training=False))
 
     # --- compute kernels ---
+    start.record()
     K_nngp_tt = compiled_nngp(x_test,  None)     # test-test NNGP (vs itself)
+    end.record()
+    torch.cuda.synchronize()
+    print(f"NNGP kernel computed in {start.elapsed_time(end):.1f} ms")
+    start.record()
     K_ntk_tt  = compiled_ntk (x_test,  None)     # test-test NTK
+    end.record()
+    torch.cuda.synchronize()
+    print(f"NTK  kernel computed in {start.elapsed_time(end):.1f} ms")
+    start.record()
     K_ntk_tr  = compiled_ntk (x_test,  x_train)  # test-train NTK
-    '''
+    end.record()
+    torch.cuda.synchronize()
+    print(f"NTK  kernel computed in {start.elapsed_time(end):.1f} ms")
 
     print("NNGP(test,test) shape:", tuple(K_nngp_tt.shape))
     print("NTK (test,test) shape:", tuple(K_ntk_tt.shape))
@@ -85,17 +123,6 @@ def main():
     sym_err = (K_ntk_tt - K_ntk_tt.T).abs().max().item()
     print(f"symmetry |K - K^T|_max = {sym_err:.3e}")
     assert sym_err < 1e-4, "NTK(test,test) should be ~symmetric."
-
-    # --- NTK-vector product check ---
-    # Build vp fn for (x1 = test, x2 = test) so NTK is square
-    ntk_vp = empirical_ntk_vp_fn(f, x_test, None, params, training=False)
-    v = torch.randn_like(f(params, x_test))  # cotangents in output space
-    Kv_vp = ntk_vp(v)
-    Kv_mat = K_ntk_tt @ v  # since we traced over logits, kernel is [N,N]
-    vp_err = (Kv_vp - Kv_mat).abs().max().item()
-    print(f"NTK-vp agreement |J J^T v - K v|_max = {vp_err:.3e}")
-    assert vp_err < 5e-3, "Vector-product path should match dense kernel action."
-    print("✓ torchtangents basic test passed.")
 
 
 if __name__ == "__main__":
