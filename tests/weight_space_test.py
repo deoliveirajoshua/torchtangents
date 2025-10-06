@@ -6,29 +6,25 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# This is a native PyTorch/unittest rewrite of the original JAX/absl test.
 
-"""Tests for `examples/weight_space.py`."""
+import unittest
 
-from absl.testing import absltest
+# Use your PyTorch port:
+# from examples import weight_space  # if you kept the same module name
+from examples import weight_space  # assumes a PyTorch-ported module with main(args)
 
-from jax import config
-from examples import weight_space
+# PyTorch version of the utilities from the previous message
 from tests import test_utils
-
-config.parse_flags_with_absl()
-config.update('jax_numpy_rank_promotion', 'raise')
 
 
 class WeightSpaceTest(test_utils.NeuralTangentsTestCase):
 
-  def test_weight_space(self):
-    weight_space.main(None)
+    def test_weight_space(self):
+        # Keep signature parity with the original: main(None)
+        # (If your PyTorch main() takes no args, just call weight_space.main().)
+        weight_space.main(None)
 
 
-if __name__ == '__main__':
-  absltest.main()
+if __name__ == "__main__":
+    unittest.main()

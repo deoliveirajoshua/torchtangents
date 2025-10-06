@@ -6,30 +6,24 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Native PyTorch/unittest rewrite of the original JAX/absl test.
 
-"""Tests for `examples/elementwise_numerical.py`."""
+import unittest
 
-from absl.testing import absltest
+# Your PyTorch port of the example under test:
+from examples import elementwise_numerical  # must define main(args) or main()
 
-from jax import config
-from examples import elementwise_numerical
+# PyTorch test utilities (ported earlier)
 from tests import test_utils
-
-
-config.parse_flags_with_absl()
-config.update('jax_numpy_rank_promotion', 'raise')
 
 
 class ElementwiseNumericalTest(test_utils.NeuralTangentsTestCase):
 
-  def test_elementwise_numerical(self):
-    elementwise_numerical.main(None)
+    def test_elementwise_numerical(self):
+        # Preserve the original call signature if kept during the port.
+        # If your PyTorch version has main() with no args, call main() instead.
+        elementwise_numerical.main(None)
 
 
-if __name__ == '__main__':
-  absltest.main()
+if __name__ == "__main__":
+    unittest.main()

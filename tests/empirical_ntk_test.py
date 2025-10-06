@@ -6,29 +6,20 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Native PyTorch/unittest rewrite of the original JAX/absl test.
 
-"""Tests for `examples/empirical_ntk.py`."""
+import unittest
 
-from absl.testing import absltest
-
-from jax import config
-from examples import empirical_ntk
-from tests import test_utils
-
-config.parse_flags_with_absl()
-config.update('jax_numpy_rank_promotion', 'raise')
+from examples import empirical_ntk   # PyTorch-ported module with main
+from tests import test_utils         # PyTorch version of NeuralTangentsTestCase
 
 
 class EmpiricalNtkTest(test_utils.NeuralTangentsTestCase):
 
-  def test_empirical_ntk(self):
-    empirical_ntk.main(None)
+    def test_empirical_ntk(self):
+        # Preserve original call style; use empirical_ntk.main() if no args.
+        empirical_ntk.main(None)
 
 
-if __name__ == '__main__':
-  absltest.main()
+if __name__ == "__main__":
+    unittest.main()

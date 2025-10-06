@@ -6,30 +6,21 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Native PyTorch/unittest rewrite of the original JAX/absl test.
 
-"""Tests for `examples/function_space.py`."""
+import unittest
 
-from absl.testing import absltest
-
-from jax import config
-from examples import function_space
-from tests import test_utils
-
-
-config.parse_flags_with_absl()
-config.update('jax_numpy_rank_promotion', 'raise')
+from examples import function_space   # PyTorch-ported module exposing main
+from tests import test_utils          # PyTorch NeuralTangentsTestCase utilities
 
 
 class FunctionSpaceTest(test_utils.NeuralTangentsTestCase):
 
-  def test_function_space(self):
-    function_space.main(None)
+    def test_function_space(self):
+        # Keep parity with the original signature; change to function_space.main()
+        # if your PyTorch port takes no arguments.
+        function_space.main(None)
 
 
-if __name__ == '__main__':
-  absltest.main()
+if __name__ == "__main__":
+    unittest.main()
