@@ -16,8 +16,8 @@ prandom.seed(1)
 # -------------------------
 # RNG + tensor helpers
 # -------------------------
-def _rng(seed: int) -> torch.Generator:
-    g = torch.Generator(device='cpu')
+def _rng(device: str | torch.device, seed: int) -> torch.Generator:
+    g = torch.Generator(device=device)  # seeds params; ops run on tensors' device
     g.manual_seed(seed)
     return g
 
@@ -71,7 +71,8 @@ class RepeatTest(test_utils.NeuralTangentsTestCase):
         ],
     )
     def test_repeat(self, same_inputs, n, layer):
-        gen_inp, gen_params = _rng(1), _rng(2)
+        device = test_utils.device_under_test()
+        gen_inp, gen_params = _rng(device, 1), _rng(device, 2)
         x1 = torch.cos(_randn((2, 3), gen_inp))
         x2 = None if same_inputs else _randn((4, 3), gen_inp)
         self._test_repeat(x1, x2, layer, n, gen_params)
@@ -90,7 +91,8 @@ class RepeatTest(test_utils.NeuralTangentsTestCase):
         ],
     )
     def test_repeat_conv(self, same_inputs, n, layer):
-        gen_inp, gen_params = _rng(3), _rng(4)
+        device = test_utils.device_under_test()
+        gen_inp, gen_params = _rng(device, 3), _rng(device, 4)
         x1 = torch.cos(_randn((2, 4, 4, 3), gen_inp))
         x2 = None if same_inputs else _randn((4, 4, 4, 3), gen_inp)
         self._test_repeat(x1, x2, layer, n, gen_params)
@@ -111,7 +113,8 @@ class RepeatTest(test_utils.NeuralTangentsTestCase):
         ],
     )
     def test_repeat_agg(self, same_inputs, n, layer):
-        gen_inp, gen_params, gen_p1, gen_p2 = _rng(5), _rng(6), _rng(7), _rng(8)
+        device = test_utils.device_under_test()
+        gen_inp, gen_params, gen_p1, gen_p2 = _rng(device, 5), _rng(device, 6), _rng(device, 7), _rng(device, 8)
         x1 = torch.cos(_randn((2, 4, 3, 3), gen_inp))
         x2 = None if same_inputs else _randn((4, 4, 3, 3), gen_inp)
 

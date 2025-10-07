@@ -19,8 +19,8 @@ prandom.seed(1)
 # -------------------------
 # RNG helpers
 # -------------------------
-def _rng(seed: int) -> torch.Generator:
-    g = torch.Generator(device='cpu')
+def _rng(device: str | torch.device, seed: int) -> torch.Generator:
+    g = torch.Generator(device=device)  # seeds params; ops run on tensors' device
     g.manual_seed(seed)
     return g
 
@@ -49,7 +49,8 @@ def _randn(shape, gen, dtype=torch.float32, device=None):
 class DiagonalTest(test_utils.NeuralTangentsTestCase):
 
     def _get_kernel_fn(self, same_inputs, readin, readout):
-        gen = _rng(1)
+        device = test_utils.device_under_test()
+        gen = _rng(device, 1)
         x1 = _randn((2, 5, 6, 3), gen).contiguous()
         x2 = None if same_inputs else _randn((3, 5, 6, 3), gen).contiguous()
         layers = [readin]
@@ -137,8 +138,8 @@ class InputReqTest(test_utils.NeuralTangentsTestCase):
 
     def test_input_req(self, same_inputs):
         test_utils.skip_test(self)  # preserve original skip behavior
-
-        gen = _rng(1)
+        device = test_utils.device_under_test()
+        gen = _rng(device, 1)
         x1 = _randn((2, 7, 8, 4, 3), gen)
         x2 = None if same_inputs else _randn((4, 7, 8, 4, 3), gen)
 
@@ -254,7 +255,9 @@ class MaskingTest(test_utils.NeuralTangentsTestCase):
         width = 512
         n_samples = 128
         tol = 0.04
-        gen = _rng(1)
+
+        device = test_utils.device_under_test()
+        gen = _rng(device, 1)
 
         x1 = _randn((4, 6, 5, 7), gen)
         x1 = test_utils.mask(x1, mask_constant, mask_axis, gen=gen, p=p)
@@ -345,7 +348,9 @@ class MaskingTest(test_utils.NeuralTangentsTestCase):
         width = 128
         n_samples = 256
         tol = 0.04
-        gen = _rng(1)
+
+        device = test_utils.device_under_test()
+        gen = _rng(device, 1)
 
         spatial_shape = ((1, 2, 3, 2, 1) if transpose else (15, 8, 9))[:n]
         filter_shape = ((2, 3, 1, 2, 1) if transpose else (7, 2, 3))[:n]

@@ -14,8 +14,8 @@ test_utils.update_test_tolerance()
 prandom.seed(1)
 
 
-def _rng(seed: int) -> torch.Generator:
-    g = torch.Generator(device='cpu')
+def _rng(device: str | torch.device, seed: int) -> torch.Generator:
+    g = torch.Generator(device=device)  # seeds params; ops run on tensors' device
     g.manual_seed(seed)
     return g
 
@@ -65,7 +65,8 @@ class FanInTest(test_utils.NeuralTangentsTestCase):
         if n_branches != 3:
             test_utils.skip_test(self)
 
-        gen = _rng(1)
+        device = test_utils.device_under_test()
+        gen = _rng(device, 1)
         x1 = torch.cos(_randn((4, 3), gen))
         x2 = None if same_inputs else _randn((8, 3), gen)
 
@@ -159,7 +160,8 @@ class FanInTest(test_utils.NeuralTangentsTestCase):
         if ((axis == 3 or fan_in_mode == 'FanInProd') and branch_in == 'dense_before_branch_in'):
             self.skipTest('Feature-axis concat/prod requires dense after FanIn.')
 
-        gen = _rng(3)
+        device = test_utils.device_under_test()
+        gen = _rng(device, 3)
         x1 = _randn((2, 5, 6, 3), gen)
         x2 = None if same_inputs else _randn((3, 5, 6, 3), gen)
 

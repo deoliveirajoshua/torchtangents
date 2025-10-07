@@ -39,7 +39,7 @@ prandom.seed(1)
 # RNG utilities
 # -------------------------
 def _rng(device: str | torch.device, seed: int) -> torch.Generator:
-    g = torch.Generator(device='cpu')  # seeds params; ops run on tensors' device
+    g = torch.Generator(device=device)  # seeds params; ops run on tensors' device
     g.manual_seed(seed)
     return g
 

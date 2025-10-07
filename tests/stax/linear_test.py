@@ -25,8 +25,8 @@ prandom.seed(1)
 # -------------------------
 # RNG + tensor helpers
 # -------------------------
-def _rng(seed: int) -> torch.Generator:
-    g = torch.Generator(device='cpu')
+def _rng(device: str | torch.device, seed: int) -> torch.Generator:
+    g = torch.Generator(device=device)  # seeds params; ops run on tensors' device
     g.manual_seed(seed)
     return g
 
@@ -49,7 +49,8 @@ def _cos_randn(shape, gen, device=None):
 class FlattenTest(test_utils.NeuralTangentsTestCase):
 
     def test_flatten(self, same_inputs):
-        gen = _rng(1)
+        device = test_utils.device_under_test()
+        gen = _rng(device, 1)
         X0_1 = _randn((4, 4, 3, 2), gen)
         X0_2 = None if same_inputs else _randn((2, 4, 3, 2), gen)
 
@@ -160,7 +161,9 @@ class ConvNDTest(test_utils.NeuralTangentsTestCase):
         width = 1024
         n_samples = 512
         tol = 0.03 if platform == 'xla' else 0.015
-        gen = _rng(1)
+
+        device = test_utils.device_under_test()
+        gen = _rng(device, 1)
 
         n_max = 5
         spatial_shape = (2, 3, 5, 4, 3)[:n] + (1,) * (n - n_max)
@@ -340,8 +343,9 @@ class AggregateTest(test_utils.NeuralTangentsTestCase):
         num_channels = 1
         output_dims = 1 if get == 'ntk' else 2**6
 
-        gen = _rng(1)
-        gen, split1, split2 = _rng(11), _rng(12), _rng(13)
+        device = test_utils.device_under_test()
+        gen = _rng(device, 1)
+        gen, split1, split2 = _rng(device, 11), _rng(device, 12), _rng(device, 13)
 
         x1 = _randn((batch1,) + tuple(shape) + (num_channels,), split1)
         x1 = torch.movedim(x1, (0, -1), (batch_axis, channel_axis))
@@ -353,7 +357,8 @@ class AggregateTest(test_utils.NeuralTangentsTestCase):
             x2 = torch.movedim(x2, (0, -1), (batch_axis, channel_axis))
 
         if mask_constant is not None:
-            gen, split1, split2 = _rng(21), _rng(22), _rng(23)
+            device = test_utils.device_under_test()
+            gen, split1, split2 = _rng(device, 21), _rng(device, 22), _rng(device, 23)
             shape1 = list(x1.shape); shape1[channel_axis] = 1
             mask1 = torch.bernoulli(torch.full(shape1, 0.3, generator=split1, device=x1.device)).bool()
             x1 = torch.where(mask1, torch.as_tensor(mask_constant, device=x1.device, dtype=x1.dtype), x1)
@@ -363,7 +368,8 @@ class AggregateTest(test_utils.NeuralTangentsTestCase):
                 mask2 = torch.bernoulli(torch.full(shape2, 0.2, generator=split2, device=x2.device)).bool()
                 x2 = torch.where(mask2, torch.as_tensor(mask_constant, device=x2.device, dtype=x2.dtype), x2)
 
-        gen, split1, split2 = _rng(31), _rng(32), _rng(33)
+        device = test_utils.device_under_test()
+        gen, split1, split2 = _rng(device, 31), _rng(device, 32), _rng(device, 33)
 
         agg_shape = shape if agg_axes is None else tuple(x1.shape[a] for a in agg_axes)
         agg_ndim = len(agg_shape)
@@ -431,9 +437,10 @@ class AggregateTest(test_utils.NeuralTangentsTestCase):
             init_fn_dense, apply_fn_dense, kernel_fn_dense = get_nn('identity', 'DENSE')
             pattern1_dense = sparse_to_dense(pattern1)
             pattern2_dense = sparse_to_dense(pattern2)
+            device = test_utils.device_under_test()
 
-            _, params_sparse = init_fn(_rng(41), x1.shape)
-            _, params_dense = init_fn_dense(_rng(41), x1.shape)
+            _, params_sparse = init_fn(_rng(device, 41), x1.shape)
+            _, params_dense = init_fn_dense(_rng(device, 41), x1.shape)
             self.assertAllClose(params_dense, params_sparse)
 
             fx1_dense = apply_fn_dense(params_dense, x1, pattern=pattern1_dense)
@@ -453,7 +460,7 @@ class AggregateTest(test_utils.NeuralTangentsTestCase):
         kernel_mc_fn = nt.monte_carlo_kernel_fn(
             init_fn=init_fn,
             apply_fn=stax.unmask_fn(apply_fn),
-            gen=_rng(52),
+            gen=_rng(device, 52),
             n_samples=2**6,
             batch_size=2 if (test_utils.device_under_test() == 'xla' and batch_axis == 0) else 0,
             device_count=-1 if batch_axis == 0 else 0,
@@ -499,7 +506,8 @@ class ConvTransposeTest(test_utils.NeuralTangentsTestCase):
 
         init_fn, apply_fn, kernel_fn = stax.ConvTranspose(width, filter_shape, strides, padding, b_std=0.1)
 
-        gen = _rng(1)
+        device = test_utils.device_under_test()
+        gen = _rng(device, 1)
         shape = (size, 1)
         x1 = _randn((2,) + shape, gen)
         x2 = _randn((3,) + shape, gen) if not same_inputs else None
@@ -594,7 +602,8 @@ class ConvTransposeTest(test_utils.NeuralTangentsTestCase):
         if size > 2:
             test_utils.skip_test(self)
 
-        gen = _rng(1)
+        device = test_utils.device_under_test()
+        gen = _rng(device,1)
         x = _randn((2, size, 3), gen)
         dn = ('NHC', 'HIO', 'NHC')
         padding = 'CIRCULAR'
@@ -602,7 +611,7 @@ class ConvTransposeTest(test_utils.NeuralTangentsTestCase):
         strides = (strides,)
 
         init_fn, _, _ = stax.ConvTranspose(4, filter_shape, strides, padding)
-        _, params = init_fn(_rng(2), x.shape)
+        _, params = init_fn(_rng(device, 2), x.shape)
         f_conv = self._conv_transpose_circular(x, params, strides, padding, dn)
         f_adj = self._conv_transpose_circular_via_grad(x, params, strides, padding, dn)
         self.assertAllClose(f_adj, f_conv)
@@ -626,24 +635,41 @@ class DotGeneralTest(test_utils.NeuralTangentsTestCase):
             batch_axis=batch_axis,
             is_rhs=is_rhs,
             diagonal_spatial=diagonal_spatial,
-            diagonal_batch=diagonal_batch
+            diagonal_batch=diagonal_batch,
         )
         for same_inputs in [True, False]
         for n in [2, 3]
         for is_rhs in [False, True]
-        for batch_axis in range(2)  # n is small; the original prunes later
-        for channel_axis in [i for i in range(2) if i != batch_axis]
+
+        # pick explicit batch/channel axes from range(n), distinct
+        for batch_axis in range(n)
+        for channel_axis in [i for i in range(n) if i != batch_axis]
+
         for diagonal_spatial in [True, False]
         for diagonal_batch in [True, False]
+
+        # batch dims: choose any subset excluding batch_axis and channel_axis
         for batch_dims in itertools.chain.from_iterable(
-            itertools.combinations([i for i in range(2) if i != channel_axis], r) for r in range(3)
+            itertools.combinations(
+                [i for i in range(n) if i not in {batch_axis, channel_axis}], r
+            )
+            for r in range(n + 1)
         )
+
+        # contracting dims: choose any subset excluding batch_axis, channel_axis, and batch_dims
         for contracting_dims in itertools.chain.from_iterable(
-            itertools.combinations([i for i in range(2) if i not in batch_dims + (channel_axis,)], r) for r in range(3)
+            itertools.combinations(
+                [i for i in range(n) if i not in set(batch_dims) | {batch_axis, channel_axis}], r
+            )
+            for r in range(n + 1)
         )
-        for c_dims in itertools.permutations(contracting_dims or ()):
-        for b_dims in itertools.permutations(batch_dims or ()):
-        for r_permutation in itertools.permutations(range(2))
+
+        # orderings of the chosen dims
+        for c_dims in itertools.permutations(contracting_dims or ())
+        for b_dims in itertools.permutations(batch_dims or ())
+
+        # permutation over all n axes (use range(n), not range(2))
+        for r_permutation in itertools.permutations(range(n))
     )
     def test_dot_general(
         self,
@@ -667,7 +693,8 @@ class DotGeneralTest(test_utils.NeuralTangentsTestCase):
 
         n_b = 2
         n_c = 1
-        g1, g2, g3 = _rng(1), _rng(2), _rng(3)
+        device = test_utils.device_under_test()
+        g1, g2, g3 = _rng(device, 1), _rng(device, 2), _rng(device, 3)
 
         x_shape_n_c = [2, 4][:n - 2]
         x_shape = list(x_shape_n_c)
@@ -749,10 +776,11 @@ class DotGeneralTest(test_utils.NeuralTangentsTestCase):
                     )
                 return axes
 
+            device = test_utils.device_under_test()
             kernel_fn_mc = nt.monte_carlo_kernel_fn(
                 init_fn=init_fn,
                 apply_fn=stax.unmask_fn(apply_fn),
-                gen=_rng(101),
+                gen=_rng(device, 101),
                 n_samples=1,
                 trace_axes=(out_c_axis,),
                 diagonal_axes=get_diagonal_axes(),
@@ -813,7 +841,8 @@ class DotGeneralTest(test_utils.NeuralTangentsTestCase):
         width = 2**8
         n_samples = 2**8
         tol = 0.03
-        g1, g2, g3 = _rng(1), _rng(2), _rng(3)
+        device = test_utils.device_under_test()
+        g1, g2, g3 = _rng(device, 1), _rng(device, 2), _rng(device, 3)
 
         mask_constant = 10.0
         x_shape = [6, 3][:n - 1] + [1]
@@ -952,7 +981,9 @@ class ImageResizeTest(test_utils.NeuralTangentsTestCase):
 
         n_b1, n_b2 = 2, 4
         n_c = 1
-        g1, g2 = _rng(1), _rng(2)
+
+        device = test_utils.device_under_test()
+        g1, g2 = _rng(device, 1), _rng(device, 2)
 
         shape = list(shape)
         shape[channel_axis] = -1
@@ -1010,10 +1041,11 @@ class ImageResizeTest(test_utils.NeuralTangentsTestCase):
                     axes += tuple(i for i in range(n) if i not in (batch_axis, channel_axis))
                 return axes
 
+            device = test_utils.device_under_test()
             kernel_fn_mc = nt.monte_carlo_kernel_fn(
                 init_fn=init_fn,
                 apply_fn=stax.unmask_fn(apply_fn),
-                gen=_rng(101),
+                gen=_rng(device, 101),
                 n_samples=1,
                 trace_axes=(channel_axis,),
                 diagonal_axes=get_diagonal_axes(),
@@ -1084,7 +1116,9 @@ class ImageResizeTest(test_utils.NeuralTangentsTestCase):
         width = 2**7
         n_samples = 2**7
         tol = 0.03
-        g1, g2 = _rng(1), _rng(2)
+
+        device = test_utils.device_under_test()
+        g1, g2 = _rng(device, 1), _rng(device, 2)
 
         mask_constant = 10.0
         x_shape = [6, 3][:n - 1] + [1]
@@ -1229,7 +1263,9 @@ class IndexTest(test_utils.NeuralTangentsTestCase):
         width = 2**7
         n_samples = 2**7
         tol = 0.05
-        g1, g2, gmc = _rng(1), _rng(2), _rng(3)
+
+        device = test_utils.device_under_test()
+        g1, g2, gmc = _rng(device, 1), _rng(device, 2), _rng(device, 3)
 
         x1 = torch.cos(_randn((6, 3, 4, 5), g1))
         if mask_constant is not None:

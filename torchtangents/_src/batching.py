@@ -133,6 +133,7 @@ def _get_n_batches_and_batch_sizes(
 ) -> Tuple[int, int, int, int]:
     # mirror original constraints
     max_serial_batch_size = math.gcd(n1, n2) // max(device_count, 1)
+    print(f"batch_size: {batch_size} | max_serial_batch_size: {max_serial_batch_size}")
     n2_batch_size = min(batch_size, max_serial_batch_size)
     if n2_batch_size != batch_size:
         warnings.warn(

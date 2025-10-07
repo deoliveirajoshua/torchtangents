@@ -24,10 +24,11 @@ prandom.seed(1)
 # -------------------------
 # RNG + tensor helpers
 # -------------------------
-def _rng(seed: int) -> torch.Generator:
-    g = torch.Generator(device='cpu')
+def _rng(device: str | torch.device, seed: int) -> torch.Generator:
+    g = torch.Generator(device=device)  # seeds params; ops run on tensors' device
     g.manual_seed(seed)
     return g
+
 
 
 def _randn(shape, gen, dtype=torch.float32, device=None):
@@ -58,7 +59,8 @@ def _value_and_grad_scalar(fn):
 class ActivationTest(test_utils.NeuralTangentsTestCase):
 
     def _test_activation_fc(self, phi, get):
-        g1, g2, gmc = _rng(1), _rng(2), _rng(3)
+        device = test_utils.device_under_test()
+        g1, g2, gmc = _rng(device, 1), _rng(device, 2), _rng(device, 3)
         x1 = torch.cos(_randn((3, 2), g1))
         x2 = torch.cos(_randn((2, 2), g2))
 
@@ -148,9 +150,9 @@ class ActivationTest(test_utils.NeuralTangentsTestCase):
         # heavy conv tests skipped to mirror original behavior when needed
         if 'conv' in model:
             test_utils.skip_test(self)
-
-        gen = _rng(1)
-        gen, split = _rng(11), _rng(12)
+        device = test_utils.device_under_test()
+        gen = _rng(device, 1)
+        gen, split = _rng(device, 11), _rng(device, 12)
         output_dim = 1024 if get == 'nngp' else 1
         b_std = 0.5
         W_std = 2.0
@@ -253,8 +255,8 @@ class ActivationTest(test_utils.NeuralTangentsTestCase):
             phi(a=a, b=b),
             stax.Dense(1)
         )
-
-        g1, g2, gmc = _rng(1), _rng(2), _rng(3)
+        device = test_utils.device_under_test()
+        g1, g2, gmc = _rng(device, 1), _rng(device, 2), _rng(device, 3)
         shape = (4, 3, 2)[:n] + (1,)
         x1 = torch.cos(_randn((2,) + tuple(shape), g1))
         if same_inputs is None:
@@ -271,7 +273,8 @@ class ActivationTest(test_utils.NeuralTangentsTestCase):
         test_utils.assert_close_matrices(self, k_mc.ntk, k.ntk, 6e-2)
 
     def test_exp_normalized(self):
-        g = _rng(0)
+        device = test_utils.device_under_test()
+        g = _rng(device, 0)
         x1 = _randn((2, 6, 7, 1), g)
         x2 = _randn((4, 6, 7, 1), g)
 
@@ -306,7 +309,8 @@ class ActivationTest(test_utils.NeuralTangentsTestCase):
         _, _, kernel_fn = stax.serial(stax.Dense(1), stax.Elementwise(nngp_fn=nngp_fn))
         _, _, kernel_fn_manual = stax.serial(stax.Dense(1), stax.ExpNormalized())
 
-        g = _rng(1)
+        device = test_utils.device_under_test()
+        g = _rng(device, 1)
         x1 = _randn((5, 4, 3, 1), g)
         x2 = _randn((6, 4, 3, 1), g)
 
@@ -321,7 +325,8 @@ class ActivationTest(test_utils.NeuralTangentsTestCase):
         readout=['pool', 'flatten']
     )
     def test_hermite(self, same_inputs, degree, get, readout):
-        g, g2, gmc = _rng(1), _rng(2), _rng(3)
+        device = test_utils.device_under_test()
+        g, g2, gmc = _rng(device, 1), _rng(device, 2), _rng(device, 3)
 
         # keep light; skip high degree like original
         if degree > 2:
@@ -390,7 +395,8 @@ class ElementwiseTest(test_utils.NeuralTangentsTestCase):
                                       stax.Dense(1), stax.Elementwise(fn, nngp_fn))
         _, _, kernel_fn_manual = stax.serial(stax.Dense(1), phi, stax.Dense(1), phi)
 
-        g = _rng(1)
+        device = test_utils.device_under_test()
+        g = _rng(device, 1)
         shape = (4, 3, 2)[:n] + (1,)
         x1 = _randn((5,) + tuple(shape), g)
 
@@ -422,7 +428,8 @@ class ElementwiseNumericalTest(test_utils.NeuralTangentsTestCase):
         if 'conv' in model:
             test_utils.skip_test(self)
 
-        g, split = _rng(1), _rng(2)
+        device = test_utils.device_under_test()
+        g, split = _rng(device,1), _rng(device, 2)
         output_dim = 1
         b_std = 0.01
         W_std = 1.0
@@ -466,7 +473,8 @@ class ElementwiseNumericalTest(test_utils.NeuralTangentsTestCase):
 class ABReluTest(test_utils.NeuralTangentsTestCase):
 
     def test_ab_relu_relu(self, same_inputs, do_stabilize):
-        g = _rng(1)
+        device = test_utils.device_under_test()
+        g = _rng(device, 1)
         X0_1 = _randn((3, 2), g)
         fc = stax.Dense(5, 1, 0)
         init_fn, apply_relu, kernel_fn_relu = stax.serial(fc, stax.Relu())
@@ -485,7 +493,8 @@ class ABReluTest(test_utils.NeuralTangentsTestCase):
                 self.assertAllClose(kernels_relu, kernels_ab_relu)
 
     def test_ab_relu_id(self, same_inputs, do_stabilize):
-        g = _rng(1)
+        device = test_utils.device_under_test()
+        g = _rng(device, 1)
         X0_1 = _randn((3, 2), g)
         fc = stax.Dense(5, 1, 0)
         X0_2 = None if same_inputs else _randn((4, 2), g)
@@ -505,7 +514,8 @@ class ABReluTest(test_utils.NeuralTangentsTestCase):
                 self.assertAllClose(kernels_id, kernels_ab_relu)
 
     def test_leaky_relu(self, same_inputs, do_stabilize):
-        g = _rng(1)
+        device = test_utils.device_under_test()
+        g = _rng(device, 1)
         X0_1 = _randn((3, 2), g)
         fc = stax.Dense(5, 1, 0)
         X0_2 = None if same_inputs else _randn((4, 2), g)
@@ -525,7 +535,8 @@ class ABReluTest(test_utils.NeuralTangentsTestCase):
                 self.assertAllClose(kernels_leaky, kernels_ab)
 
     def test_abs(self, same_inputs, do_stabilize):
-        g = _rng(1)
+        device = test_utils.device_under_test()
+        g = _rng(device, 1)
         X0_1 = _randn((3, 2), g)
         fc = stax.Dense(5, 1, 0)
         X0_2 = None if same_inputs else _randn((4, 2), g)
@@ -554,7 +565,8 @@ class AutodiffTest(test_utils.NeuralTangentsTestCase):
         phi=[stax.Erf, stax.Sin, stax.Gelu, stax.Relu, stax.ElementwiseNumerical]
     )
     def test_autodiff(self, get, same_inputs, phi):
-        g1, g2, g3, g4 = _rng(1), _rng(2), _rng(3), _rng(4)
+        device = test_utils.device_under_test()
+        g1, g2, g3, g4 = _rng(device, 1), _rng(device, 2), _rng(device, 3), _rng(device, 4)
 
         x1 = torch.cos(_randn((3, 1, 2, 3), g1))
         if same_inputs is None:
@@ -661,7 +673,8 @@ class AutodiffTest(test_utils.NeuralTangentsTestCase):
 
         def get_x(kind, key):
             shape = (1, 2)
-            g = _rng(key)
+            device = test_utils.device_under_test()
+            g = _rng(device, key)
             if kind == 'zeros':
                 x = torch.zeros(shape)
             elif kind == 'ones':
@@ -695,7 +708,8 @@ class AutodiffTest(test_utils.NeuralTangentsTestCase):
         if phi == stax.ExpNormalized or (get == 'ntk' and phi == stax.Sign):
             raise unittest.SkipTest('Not comparing against MC kernels.')
 
-        _kernel_scalar_mc = nt.monte_carlo_kernel_fn(init_fn, apply_fn, gen=_rng(3), n_samples=1, device_count=0)
+        device = test_utils.device_under_test()
+        _kernel_scalar_mc = nt.monte_carlo_kernel_fn(init_fn, apply_fn, gen=_rng(device, 3), n_samples=1, device_count=0)
 
         def kernel_scalar_mc(x1, x2):
             return _kernel_scalar_mc(x1, x2, get)[0, 0]
@@ -712,7 +726,8 @@ class AutodiffTest(test_utils.NeuralTangentsTestCase):
 
         # small-ish Monte Carlo average for gradient comparison
         def kernel_scalar_mc_grad_mean(x1, x2):
-            g = _rng(4)
+            device = test_utils.device_under_test()
+            g = _rng(device, 4)
             n_samples = 2**8
             k_sum = 0.0
             g1_sum = torch.zeros_like(x1) if x1 is not None else None

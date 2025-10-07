@@ -18,7 +18,10 @@ from typing import Callable, Optional, Sequence, Any
 import numpy as np
 import torch
 import unittest
-from parameterized import parameterized
+from parameterized import parameterized as _parameterized  # alias for clarity
+
+
+
 
 # -----------------------------------------------------------------------------
 # Configuration & device detection
@@ -27,13 +30,20 @@ from parameterized import parameterized
 NT_TEST_DUT = os.getenv("NT_TEST_DUT", "").strip()
 NT_NUM_GENERATED_CASES = int(os.getenv("NT_NUM_GENERATED_CASES", "4"))
 
+
+# --- Add this probe right after the imports ---
+try:
+    _NP_BFLOAT16 = np.dtype("bfloat16")  # will raise on older NumPy
+    _HAS_NP_BFLOAT16 = True
+except TypeError:
+    _NP_BFLOAT16 = None
+    _HAS_NP_BFLOAT16 = False
+
 def device_under_test() -> str:
     if NT_TEST_DUT:
         return NT_TEST_DUT
     if torch.cuda.is_available():
-        return "cuda"
-    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        return "mps"
+        return "cuda:0"
     return "cpu"
 
 # -----------------------------------------------------------------------------
@@ -49,14 +59,33 @@ _python_scalar_dtypes = {
 
 def _dtype(x) -> np.dtype:
     if hasattr(x, "dtype"):
-        # Torch tensor or numpy array
         if isinstance(x, torch.Tensor):
-            return np.dtype(str(x.detach().cpu().numpy().dtype))
+            # Map torch dtypes to numpy dtypes without going through .numpy() for bf16
+            td = x.dtype
+            if td is torch.float32:
+                return np.dtype(np.float32)
+            if td is torch.float64:
+                return np.dtype(np.float64)
+            if td is torch.float16:
+                return np.dtype(np.float16)
+            if td is torch.bfloat16:
+                # Use np.bfloat16 if available; otherwise compare as float32
+                return _NP_BFLOAT16 if _HAS_NP_BFLOAT16 else np.dtype(np.float32)
+            if td is torch.int64:
+                return np.dtype(np.int64)
+            if td is torch.int32:
+                return np.dtype(np.int32)
+            if td is torch.bool:
+                return np.dtype(np.bool_)
+            # Fallback: go through numpy (works for supported dtypes)
+            return np.dtype(str(x.detach().cpu().to(torch.float32).numpy().dtype))
+        # NumPy array
         return np.dtype(x.dtype)
     elif type(x) in _python_scalar_dtypes:
         return np.dtype(_python_scalar_dtypes[type(x)])
     else:
         return np.asarray(x).dtype
+
 
 _DEFAULT_TOLERANCE = {
     np.dtype(np.bool_): 0.0,
@@ -65,8 +94,22 @@ _DEFAULT_TOLERANCE = {
     np.dtype(np.float16): 5e-3,
     np.dtype(np.float32): 5e-3,
     np.dtype(np.float64): 1e-5,
-    np.dtype(np.dtype("bfloat16")): 5e-3,
 }
+
+# --- Only register bf16 tolerance if NumPy supports it ---
+if _HAS_NP_BFLOAT16:
+    _DEFAULT_TOLERANCE[_NP_BFLOAT16] = 5e-3
+
+
+def _to_numpy(x):
+    if isinstance(x, torch.Tensor):
+        t = x.detach().cpu()
+        # --- Convert bf16 to f32 if NumPy doesn't support bf16 ---
+        if t.dtype is torch.bfloat16 and not _HAS_NP_BFLOAT16:
+            t = t.to(torch.float32)
+        return t.numpy()
+    return np.asarray(x)
+
 
 def _default_tolerance() -> dict[np.dtype, float]:
     # Keep a TPU branch for completeness; PyTorch doesn't target TPU.
@@ -147,9 +190,10 @@ def product(*kwargs_seqs, **testgrid):
     ]
     return parameters(testcases)
 
+
 def parameters(testcases):
     subset = _cases_from_list(testcases)
-    return parameterized.parameters(subset)
+    return _parameterized.expand(subset)
 
 # -----------------------------------------------------------------------------
 # Tree utilities

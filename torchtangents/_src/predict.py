@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Callable, Generator, Iterable, NamedTuple, Optional, Protocol, Union, Tuple, Dict
 
+import numpy as np
 import torch
 from torch import Tensor
 
@@ -829,3 +830,58 @@ def _get_attr(k, g: str) -> Tensor:
     if isinstance(k, Tensor):
         return k
     return getattr(k, g)
+
+
+def _is_sequence(x: Any) -> bool:
+    return isinstance(x, (list, tuple)) or (isinstance(x, dict))
+
+def _tree_map(fn, x):
+    if isinstance(x, dict):
+        return {k: _tree_map(fn, v) for k, v in x.items()}
+    elif isinstance(x, (list, tuple)):
+        t = type(x)
+        return t(_tree_map(fn, xi) for xi in x)
+    else:
+        return fn(x)
+
+def _tree_all(x):
+    if isinstance(x, dict):
+        return all(_tree_all(v) for v in x.values())
+    elif isinstance(x, (list, tuple)):
+        return all(_tree_all(v) for v in x)
+    else:
+        return bool(x)
+
+
+def _is_on_cpu(x: Any) -> bool:
+    """
+    Return True iff every leaf tensor/array in pytree `x` resides on CPU.
+
+    Leaf types supported:
+      * torch.Tensor / torch.nn.Parameter
+      * numpy.ndarray
+      * Python scalars / None
+    Other leaf types will raise NotImplementedError (to match original behavior).
+    """
+    def _leaf_is_on_cpu(z: Any) -> bool:
+        # Torch tensors/parameters
+        if isinstance(z, torch.Tensor):
+            # device.type is 'cpu', 'cuda', 'mps', 'xpu', etc.
+            return z.device.type == "cpu"
+        # NumPy arrays are always host-resident
+        if isinstance(z, np.ndarray):
+            return True
+        # Python scalars & None: treat as CPU
+        if z is None or isinstance(z, (bool, int, float, complex)):
+            return True
+        # If something array-like sneaks in, upcast to numpy to check; if it
+        # fails, fall through to NotImplementedError.
+        try:
+            if hasattr(z, "__array__"):
+                np.asarray(z)  # will raise if not array-like
+                return True
+        except Exception:
+            pass
+        raise NotImplementedError(type(z))
+
+    return _tree_all(_tree_map(_leaf_is_on_cpu, x))
