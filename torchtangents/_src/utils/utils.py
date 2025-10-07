@@ -696,3 +696,40 @@ def tree_map(fn, *trees):
         assert len(trees) == 1
         return _map(trees[0])
     return _pytree.tree_map(fn, *trees)
+
+
+def _generator_device(gen: torch.Generator) -> torch.device:
+    """
+    Return the device associated with a torch.Generator.
+    Falls back to CPU if the attribute is unavailable.
+    """
+    dev = getattr(gen, "device", None)
+    return torch.device(dev) if dev is not None else torch.device("cpu")
+
+
+def as_seed(x: Optional[Union[int, np.integer, torch.Generator]]) -> int:
+    """
+    Convert a variety of 'seed-like' inputs to a Python int.
+
+    - If x is an int/np.integer: return int(x).
+    - If x is a torch.Generator: draw a 64-bit seed from it on its device.
+      (This consumes RNG state, which is fine for deterministic splitting.)
+    - If x is None: use torch.seed() to create a fresh process-wide seed.
+    """
+    if x is None:
+        # torch.seed() returns a random 64-bit seed and sets the default generator.
+        # We only need the value.
+        return int(torch.seed())
+
+    if isinstance(x, (int, np.integer)):
+        return int(x)
+
+    if isinstance(x, torch.Generator):
+        dev = _generator_device(x)
+        # Draw a 64-bit value without host roundtrips; matches the generator's device.
+        val = torch.randint(
+            0, 2**63 - 1, (1,), generator=x, device=dev, dtype=torch.int64
+        ).item()
+        return int(val)
+
+    raise TypeError(f"Unsupported seed-like object: {type(x)}")

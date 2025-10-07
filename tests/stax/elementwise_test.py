@@ -74,7 +74,7 @@ class ActivationTest(test_utils.NeuralTangentsTestCase):
         mc_kernel_fn = nt.monte_carlo_kernel_fn(
             init_fn=init_fn,
             apply_fn=apply_fn,
-            gen=gmc,
+            key=gmc,
             n_samples=800,
             implementation=2,
             vmap_axes=0,
@@ -722,7 +722,7 @@ class AutodiffTest(test_utils.NeuralTangentsTestCase):
             raise unittest.SkipTest('Not comparing against MC kernels.')
 
         device = test_utils.device_under_test()
-        _kernel_scalar_mc = nt.monte_carlo_kernel_fn(init_fn, apply_fn, gen=_rng(device, 3), n_samples=1, device_count=0)
+        _kernel_scalar_mc = nt.monte_carlo_kernel_fn(init_fn, apply_fn, key=_rng(device, 3), n_samples=1, device_count=0)
 
         def kernel_scalar_mc(x1, x2):
             return _kernel_scalar_mc(x1, x2, get)[0, 0]

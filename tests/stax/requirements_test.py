@@ -167,7 +167,7 @@ class InputReqTest(test_utils.NeuralTangentsTestCase):
         correct_conv_fn_mc = nt.monte_carlo_kernel_fn(
             init_fn=init_fn,
             apply_fn=stax.unmask_fn(apply_fn),
-            gen=gen,
+            key=gen,
             n_samples=400,
             implementation=_DEFAULT_TESTING_NTK_IMPLEMENTATION,
             vmap_axes=0
@@ -307,7 +307,7 @@ class MaskingTest(test_utils.NeuralTangentsTestCase):
             init_fn=init_fn,
             apply_fn=stax.unmask_fn(apply_fn),
             key=gen,
-            n_samples=n_samplesW,
+            n_samples=n_samples,
             device_count=0 if concat in (0, -2) else -1,
             implementation=_DEFAULT_TESTING_NTK_IMPLEMENTATION,
             vmap_axes=None if concat in (0, -2) else 0,
@@ -465,7 +465,7 @@ class MaskingTest(test_utils.NeuralTangentsTestCase):
         kernel_fn_mc = nt.monte_carlo_kernel_fn(
             init_fn=init_fn,
             apply_fn=stax.unmask_fn(apply_fn),
-            gen=gen,
+            key=gen,
             n_samples=n_samples,
             device_count=0 if concat in (0, -n) else -1,
             implementation=_DEFAULT_TESTING_NTK_IMPLEMENTATION,

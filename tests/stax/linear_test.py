@@ -65,19 +65,19 @@ class FlattenTest(test_utils.NeuralTangentsTestCase):
 
         n = 100
         kernel_fc_mc = nt.monte_carlo_kernel_fn(
-            init_fc, apply_fc, gen=gen, n_samples=n, vmap_axes=0,
+            init_fc, apply_fc, key=gen, n_samples=n, vmap_axes=0,
             implementation=_DEFAULT_TESTING_NTK_IMPLEMENTATION
         )
         kernel_bot_mc = nt.monte_carlo_kernel_fn(
-            init_bot, apply_bot, gen=gen, n_samples=n, vmap_axes=0,
+            init_bot, apply_bot, key=gen, n_samples=n, vmap_axes=0,
             implementation=_DEFAULT_TESTING_NTK_IMPLEMENTATION
         )
         kernel_mid_mc = nt.monte_carlo_kernel_fn(
-            init_mid, apply_mid, gen=gen, n_samples=n, vmap_axes=0,
+            init_mid, apply_mid, key=gen, n_samples=n, vmap_axes=0,
             implementation=_DEFAULT_TESTING_NTK_IMPLEMENTATION
         )
         kernel_top_mc = nt.monte_carlo_kernel_fn(
-            init_top, apply_top, gen=gen, n_samples=n, vmap_axes=0,
+            init_top, apply_top, key=gen, n_samples=n, vmap_axes=0,
             implementation=_DEFAULT_TESTING_NTK_IMPLEMENTATION
         )
 
@@ -232,7 +232,7 @@ class ConvNDTest(test_utils.NeuralTangentsTestCase):
             raise ValueError(get)
 
         kernel_fn_mc = nt.monte_carlo_kernel_fn(
-            init_fn, apply_fn, gen=gen, n_samples=n_samples,
+            init_fn, apply_fn, key=gen, n_samples=n_samples,
             implementation=_DEFAULT_TESTING_NTK_IMPLEMENTATION, vmap_axes=0
         )
 
@@ -460,7 +460,7 @@ class AggregateTest(test_utils.NeuralTangentsTestCase):
         kernel_mc_fn = nt.monte_carlo_kernel_fn(
             init_fn=init_fn,
             apply_fn=stax.unmask_fn(apply_fn),
-            gen=_rng(device, 52),
+            key=_rng(device, 52),
             n_samples=2**6,
             batch_size=2 if (test_utils.device_under_test() == 'xla' and batch_axis == 0) else 0,
             device_count=-1 if batch_axis == 0 else 0,
@@ -526,7 +526,7 @@ class ConvTransposeTest(test_utils.NeuralTangentsTestCase):
             diagonal_axes += (1,)
 
         kernel_fn_mc = nt.monte_carlo_kernel_fn(
-            init_fn, apply_fn, gen=gen, n_samples=n_samples, diagonal_axes=diagonal_axes,
+            init_fn, apply_fn, key=gen, n_samples=n_samples, diagonal_axes=diagonal_axes,
             device_count=0, implementation=_DEFAULT_TESTING_NTK_IMPLEMENTATION, vmap_axes=0
         )
         k_mc = kernel_fn_mc(x1, None if diagonal_batch else x2, 'nngp')
@@ -780,7 +780,7 @@ class DotGeneralTest(test_utils.NeuralTangentsTestCase):
             kernel_fn_mc = nt.monte_carlo_kernel_fn(
                 init_fn=init_fn,
                 apply_fn=stax.unmask_fn(apply_fn),
-                gen=_rng(device, 101),
+                key=_rng(device, 101),
                 n_samples=1,
                 trace_axes=(out_c_axis,),
                 diagonal_axes=get_diagonal_axes(),
@@ -889,7 +889,7 @@ class DotGeneralTest(test_utils.NeuralTangentsTestCase):
         kernel_fn_mc = nt.monte_carlo_kernel_fn(
             init_fn=init_fn,
             apply_fn=stax.unmask_fn(apply_fn),
-            gen=g1,
+            key=g1,
             n_samples=n_samples,
             trace_axes=(int(out_c_axis > out_b_axis) if do_pool else 1,),
             device_count=0,
@@ -1045,7 +1045,7 @@ class ImageResizeTest(test_utils.NeuralTangentsTestCase):
             kernel_fn_mc = nt.monte_carlo_kernel_fn(
                 init_fn=init_fn,
                 apply_fn=stax.unmask_fn(apply_fn),
-                gen=_rng(device, 101),
+                key=_rng(device, 101),
                 n_samples=1,
                 trace_axes=(channel_axis,),
                 diagonal_axes=get_diagonal_axes(),
@@ -1149,7 +1149,7 @@ class ImageResizeTest(test_utils.NeuralTangentsTestCase):
         kernel_fn_mc = nt.monte_carlo_kernel_fn(
             init_fn=init_fn,
             apply_fn=stax.unmask_fn(apply_fn),
-            gen=g1,
+            key=g1,
             n_samples=n_samples,
             device_count=0,
             implementation=_DEFAULT_TESTING_NTK_IMPLEMENTATION,
@@ -1321,7 +1321,7 @@ class IndexTest(test_utils.NeuralTangentsTestCase):
         kernel_fn_mc = nt.monte_carlo_kernel_fn(
             init_fn=init_fn,
             apply_fn=stax.unmask_fn(apply_fn),
-            gen=gmc,
+            key=gmc,
             n_samples=n_samples,
             device_count=0,
             diagonal_axes=diagonal_axes,
