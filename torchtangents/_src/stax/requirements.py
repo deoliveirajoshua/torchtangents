@@ -391,6 +391,27 @@ def _cov_full_batch_diag_spatial(
     ret = torch.einsum('b...c,B...c->bB...', x1, x2)  # (B1, B2, S...)
     return ret
 
+
+def _paired_spatial_diag(x: torch.Tensor, start_axis: int, n_spatial: int) -> torch.Tensor:
+    """
+    x has shape (..., s1, s1, s2, s2, ..., sK, sK, ...),
+    starting at `start_axis` (i.e., interleaved pairs already).
+    Take diagonal over each (si, si) and return (..., s1, s2, ..., sK, ...).
+
+    We use torch.diagonal and move the new diag dim back to the pair's start,
+    so repeated application maintains ordering.
+    """
+    for i in range(n_spatial):
+        d1 = start_axis + 2 * i
+        d2 = d1 + 1
+        # take diag over the pair -> appends a new dim at the end
+        x = x.diagonal(offset=0, dim1=d1, dim2=d2)
+        # move the new trailing diag dim back to position d1
+        x = x.movedim(-1, d1)
+    return x
+
+
+
 def _cov_diag_batch(
     x: torch.Tensor,
     diagonal_spatial: bool,

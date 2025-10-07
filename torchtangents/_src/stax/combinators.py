@@ -23,6 +23,7 @@ import warnings
 import frozendict
 import torch
 
+from ..utils.utils import _generator_device
 from ..utils.kernel import Kernel
 from ..utils.typing import InternalLayer, Layer, LayerKernelFn, NTTree, NTTrees, Shapes
 from .requirements import Diagonal, get_req, layer, requires
@@ -47,12 +48,6 @@ def _tree_zip(*trees):
         t = type(ref)
         return t(_tree_zip(*(xs[i] for xs in trees)) for i in range(len(ref)))
     return trees
-
-
-def _generator_device(gen: torch.Generator) -> torch.device:
-    # PyTorch exposes generator.device on CUDA (>=1.10-ish); default to CPU
-    dev = getattr(gen, "device", None)
-    return torch.device(dev) if dev is not None else torch.device("cpu")
 
 
 def _split_generator(gen: torch.Generator) -> Tuple[torch.Generator, torch.Generator]:

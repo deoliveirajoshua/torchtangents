@@ -771,6 +771,11 @@ def _Conv(
         raise ValueError(f"Unsupported spatial rank: {nd}")
 
     nd = len(filter_shape)
+    if nd == 0:
+        # No spatial axes – this is a pure channel transform; identical to Dense.
+        # Preserve init/apply/kernel behavior by delegating to Dense.
+        return Dense(out_chan, W_std=W_std, b_std=b_std)
+
     if dimension_numbers is None:
         dimension_numbers = _default_dns(nd)
 
@@ -900,6 +905,7 @@ def _Conv(
             return F.pad(x, pads, mode="circular")
         return x
 
+
     def _shared_conv_call(x: torch.Tensor, W: torch.Tensor, bias: Optional[torch.Tensor]):
         if nd == 1:
             fn_fwd, fn_t = F.conv1d, F.conv_transpose1d
@@ -911,11 +917,27 @@ def _Conv(
             raise ValueError("Unsupported spatial rank.")
 
         if not transpose:
-            return fn_fwd(x, W, bias=None, stride=strides,
-                          padding=0 if pad_enum in (Padding.SAME, Padding.CIRCULAR) else 0)
+            # Manual padding for 'SAME' / 'CIRCULAR'
+            if pad_enum in (Padding.SAME, Padding.CIRCULAR):
+                _strides = strides if len(strides) else (1,) * nd
+                pads: list[int] = []
+                for ksz, s, in_dim in zip(filter_shape, _strides, x.shape[2:2 + nd]):
+                    out_dim = math.ceil(in_dim / s)
+                    total = max((out_dim - 1) * s + ksz - in_dim, 0)
+                    left = total // 2
+                    right = total - left
+                    pads.extend([left, right])
+                pads = pads[::-1]  # F.pad expects last dim first
+                mode = 'circular' if pad_enum == Padding.CIRCULAR else 'constant'
+                x = F.pad(x, pads, mode=mode)
+
+            return fn_fwd(x, W, bias=bias, stride=strides, padding=0)
+
         else:
-            return fn_t(x, W, bias=None, stride=strides, padding=0,
-                        output_padding=0)
+            # Transposed conv: define output_padding (zeros) to avoid NameError.
+            # If you later need exact shape control, compute per-dim output_padding here.
+            output_padding = (0,) * nd
+            return fn_t(x, W, bias=bias, stride=strides, padding=0, output_padding=output_padding)
 
     def _apply_shared(params, inputs):
         W, b = params
@@ -2030,56 +2052,61 @@ def LayerNorm(
 @layer
 @supports_masking(remask_kernel=False)
 def Dropout(rate: float, mode: str = 'train') -> InternalLayer:
-  """Dropout.
+    """Inverted Dropout (keep prob = `rate`) with NTK-aware kernel update.
 
-  Based on :obj:`jax.example_libraries.stax.Dropout`.
+    - `mode='train'`: apply dropout mask and scale by 1/rate.
+    - `mode='test'`: identity.
+    - `kernel_fn`: matches your scaling rules for cov1/cov2/nngp/ntk.
+    """
+    if mode not in ('test', 'train'):
+        raise ValueError('The `mode` must be either "test"  or "train".')
+    if rate <= 0. or rate > 1.:
+        raise ValueError('The `rate` must be > 0. and <= 1.')
+    keep = float(rate)
 
-  Args:
-    rate:
-      Specifies the keep `rate`, e.g. `rate=1` is equivalent to keeping all
-      neurons.
+    def init_fn(rng: torch.Generator, input_shape, **kwargs):
+        # No parameters; shape unchanged
+        return input_shape, ()
 
-    mode:
-      Either `"train"` or `"test"`.
+    def apply_fn(params, x: torch.Tensor, *, gen: torch.Generator | None = None, **kwargs):
+        if mode == 'test' or keep == 1.0:
+            return x
+        # Inverted dropout: multiply by mask / keep
+        # Use provided generator if available for determinism.
+        probs = torch.full_like(x, keep)
+        mask = torch.bernoulli(probs, generator=gen) if gen is not None else torch.bernoulli(probs)
+        return x * mask.to(dtype=x.dtype) / keep
 
-  Returns:
-    `(init_fn, apply_fn, kernel_fn)`.
-  """
-  if mode not in ('test', 'train'):
-    raise ValueError('The `mode` must be either "test"  or "train".')
-  if rate <= 0. or rate > 1.:
-    raise ValueError('The `rate` must be > 0. and <= 1.')
+    # --- Kernel side (your existing scaling logic preserved) ---
+    kernel_fn_test = lambda k, **kwargs: k
 
-  init_fn, apply_fn = ostax.Dropout(rate, mode=mode)
-  kernel_fn_test = lambda k, **kwargs: k
+    @requires(use_dropout=True)
+    def kernel_fn_train(k: Kernel, **kwargs):
+        if k.is_input:
+            raise ValueError('Dropout cannot be applied to the input layer.')
 
-  @requires(use_dropout=True)
-  def kernel_fn_train(k: Kernel, **kwargs):
-    """kernel_fn for `train` mode."""
-    cov1, nngp, cov2, ntk = k.cov1, k.nngp, k.cov2, k.ntk
+        cov1, nngp, cov2, ntk = k.cov1, k.nngp, k.cov2, k.ntk
+        factor = 1.0 / keep
 
-    if k.is_input:
-      raise ValueError('Dropout cannot be applied to the input layer.')
+        # Scale diagonals of covariances
+        cov1 = _diag_mul(cov1, factor, k.diagonal_batch, k.diagonal_spatial)
+        cov2 = _diag_mul(cov2, factor, k.diagonal_batch, k.diagonal_spatial)
 
-    factor = 1./rate
+        # For cross-cov, scale only if x1==x2
+        new_factor = torch.where(k.x1_is_x2, torch.as_tensor(factor, dtype=nngp.dtype, device=nngp.device),
+                                 torch.as_tensor(1.0,   dtype=nngp.dtype, device=nngp.device))
+        nngp = _diag_mul(nngp, new_factor, False, k.diagonal_spatial)
+        ntk  = _diag_mul(ntk,  new_factor, False, k.diagonal_spatial)
 
-    cov1 = _diag_mul(cov1, factor, k.diagonal_batch, k.diagonal_spatial)
-    cov2 = _diag_mul(cov2, factor, k.diagonal_batch, k.diagonal_spatial)
+        return k.replace(cov1=cov1,
+                         nngp=nngp,
+                         cov2=cov2,
+                         ntk=ntk,
+                         is_gaussian=False)
 
-    new_factor = torch.where(k.x1_is_x2, factor, 1.)
-    nngp = _diag_mul(nngp, new_factor, False, k.diagonal_spatial)
-    ntk = _diag_mul(ntk, new_factor, False, k.diagonal_spatial)
+    kernel_fn = kernel_fn_test if mode == 'test' else kernel_fn_train
+    return init_fn, apply_fn, kernel_fn
 
-    # TODO(xlc): under which condition could we leave `is_gaussian` unchanged?
-    return k.replace(cov1=cov1,
-                     nngp=nngp,
-                     cov2=cov2,
-                     ntk=ntk,
-                     is_gaussian=False)
-
-  kernel_fn = kernel_fn_test if mode == 'test' else kernel_fn_train
-
-  return init_fn, apply_fn, kernel_fn
 
 
 @layer
@@ -2312,10 +2339,10 @@ _CONV_KERNEL_DIMENSION_NUMBERS = ('NCHW', 'OIHW', 'NCHW')
 
 
 def _affine(
-    mat: Optional[jnp.ndarray],
+    mat: Optional[torch.tensor],
     W_std: float,
     b_std: Optional[float],
-) -> Optional[jnp.ndarray]:
+) -> Optional[torch.tensor]:
   """Get covariances of affine outputs if inputs have covariances `nngp`.
 
   The output is assumed to be `xW + b`, where `x` is the input, `W` is a matrix

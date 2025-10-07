@@ -939,9 +939,7 @@ def ElementwiseNumerical(
 
             def integrate(f: Callable[[torch.Tensor], torch.Tensor]) -> torch.Tensor:
                 # fvals shape (deg, deg, ...)
-                fvals = f(_sqrt(2 * q11_e) * x) * (
-                    f(nngp_e / _sqrt(q11_e / 2, 1e-30) * x + _sqrt(2 * (q22_e - nngp_e**2 / q11_e), 1e-30) * y)
-                )
+                fvals = f(_sqrt(2 * q11_e) * x) * (f(nngp_e / _sqrt(q11_e / 2, 1e-30) * x + _sqrt(2 * (q22_e - nngp_e**2 / q11_e), 1e-30) * y))
                 # tensordot over the first two axes with the grid weights
                 out = (grid.unsqueeze(-1) * fvals).sum(dim=xy_axes) / math.pi
                 return out
