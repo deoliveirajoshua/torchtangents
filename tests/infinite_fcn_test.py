@@ -9,7 +9,6 @@
 # Native PyTorch/unittest rewrite of the original JAX/absl test.
 
 import unittest
-
 from examples import infinite_fcn   # PyTorch-ported module exposing main
 from tests import test_utils        # PyTorch version of NeuralTangentsTestCase
 

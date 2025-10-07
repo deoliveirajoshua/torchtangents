@@ -21,6 +21,7 @@ import enum
 from typing import Any, Callable, Optional, Sequence, Union
 import warnings
 
+import inspect
 import torch
 import numpy as np
 import frozendict  # if not available, install `frozendict`
@@ -34,6 +35,25 @@ from ..utils.typing import Layer, LayerKernelFn, NTTree, PyTree
 # --------------------------------------------------------------------------
 # Tiny NTTree helpers (lists/tuples as internal nodes, leaves otherwise)
 # --------------------------------------------------------------------------
+
+def _call_with_accepted_kwargs(fn, *args, **kwargs):
+    """
+    Call `fn(*args, **filtered_kwargs)` where we drop any kwargs that `fn`
+    doesn't accept (unless it has **kwargs already).
+    """
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        # C-implemented or builtins; best effort – just call
+        return fn(*args, **kwargs)
+
+    params = sig.parameters.values()
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params):
+        return fn(*args, **kwargs)
+
+    accepted = {k: v for k, v in kwargs.items() if k in sig.parameters}
+    return fn(*args, **accepted)
+
 
 def _is_list_or_tuple(x): return type(x) in (list, tuple)
 
@@ -334,7 +354,9 @@ def _cov_diag_batch_full_spatial(
     spatial = x.shape[1:-1]
     c = x.shape[-1]
     x2 = x.reshape(b, -1, c)                 # (B, P, C)
+    print(f"x2 shape: {x2.shape}")
     ret = torch.einsum('bpc,bqc->bpq', x2, x2)  # (B, P, P)
+    print(f"ret shape: {ret.shape}")
     shape = (b,) + spatial + spatial         # (B, s1,...,sk, s1,...,sk)
     ret = ret.reshape(shape)
     ret = utils.zip_axes(ret, 1)             # -> interleave spatial axes
@@ -353,7 +375,7 @@ def _cov_full_batch_full_spatial(
     p = int(np.prod(spatial))
     X1 = x1.reshape(b1, p, c)
     X2 = x2.reshape(b2, p, c)
-    ret = torch.einsum('bpc,Bqc->bBpQ', X1, X2)  # (B1, B2, P, Q)
+    ret = torch.einsum('bpc,Bqc->bBpq', X1, X2)  # (B1, B2, P, Q)
     ret = ret.reshape((b1, b2) + spatial + spatial)
     ret = utils.zip_axes(ret, 2)
     return ret
@@ -504,7 +526,7 @@ def _propagate_shape(
     gen.manual_seed(0)
     # shaped is an NTTree of ShapedArray-like tuples (we used ShapedArray in other module,
     # but for shape propagation we pass plain tuples)
-    out_shape, _params = init_fn(gen, shaped, **kwargs)
+    out_shape, _params = _call_with_accepted_kwargs(init_fn,gen, shaped, **kwargs)
     # Some apply_fns may return a MaskedArray; we only pass shapes through.
     if isinstance(out_shape, MaskedArray):
         out_shape = out_shape.masked_value

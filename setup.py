@@ -11,7 +11,6 @@ setup(
         "torch>=2.1",
         "numpy",
         "frozendict",
-        "absl-py",
         "parameterized"
     ],
     packages=find_packages(

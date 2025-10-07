@@ -30,7 +30,6 @@ def _rng(device: str | torch.device, seed: int) -> torch.Generator:
     return g
 
 
-
 def _randn(shape, gen, dtype=torch.float32, device=None):
     device = device or test_utils.device_under_test()
     return torch.randn(*shape, generator=gen, dtype=dtype, device=device)
@@ -316,6 +315,8 @@ class ActivationTest(test_utils.NeuralTangentsTestCase):
 
         k = kernel_fn(x1, x2)
         k_manual = kernel_fn_manual(x1, x2)
+        print(f"k.shape: {k.nngp.shape}")
+        print(f"k_manual.shape: {k_manual.nngp.shape}")
         self.assertAllClose(k_manual, k)
 
     @test_utils.product(
@@ -466,12 +467,12 @@ class ElementwiseNumericalTest(test_utils.NeuralTangentsTestCase):
 # ============================================================
 # ABRelu equivalence tests
 # ============================================================
-@test_utils.product(
-    same_inputs=[True, False],
-    do_stabilize=[True, False],
-)
 class ABReluTest(test_utils.NeuralTangentsTestCase):
 
+    @test_utils.product(
+        same_inputs=[True, False],
+        do_stabilize=[True, False],
+    )
     def test_ab_relu_relu(self, same_inputs, do_stabilize):
         device = test_utils.device_under_test()
         g = _rng(device, 1)
@@ -492,6 +493,10 @@ class ABReluTest(test_utils.NeuralTangentsTestCase):
                 kernels_ab_relu = kernel_fn_ab_relu(X0_1, X0_2)
                 self.assertAllClose(kernels_relu, kernels_ab_relu)
 
+    @test_utils.product(
+        same_inputs=[True, False],
+        do_stabilize=[True, False],
+    )
     def test_ab_relu_id(self, same_inputs, do_stabilize):
         device = test_utils.device_under_test()
         g = _rng(device, 1)
@@ -513,6 +518,10 @@ class ABReluTest(test_utils.NeuralTangentsTestCase):
                 kernels_ab_relu = kernel_fn_ab_relu(X0_1, X0_2).replace(is_gaussian=True)
                 self.assertAllClose(kernels_id, kernels_ab_relu)
 
+    @test_utils.product(
+        same_inputs=[True, False],
+        do_stabilize=[True, False],
+    )
     def test_leaky_relu(self, same_inputs, do_stabilize):
         device = test_utils.device_under_test()
         g = _rng(device, 1)
@@ -534,6 +543,10 @@ class ABReluTest(test_utils.NeuralTangentsTestCase):
                 kernels_ab = kernel_fn_ab(X0_1, X0_2)
                 self.assertAllClose(kernels_leaky, kernels_ab)
 
+    @test_utils.product(
+        same_inputs=[True, False],
+        do_stabilize=[True, False],
+    )
     def test_abs(self, same_inputs, do_stabilize):
         device = test_utils.device_under_test()
         g = _rng(device, 1)

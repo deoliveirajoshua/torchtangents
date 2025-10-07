@@ -8,47 +8,65 @@
 #
 # This file is a native PyTorch reimplementation of JAX-based test utilities.
 
+from __future__ import annotations
+
 import dataclasses
+import inspect
 import itertools
 import logging
 import os
 from types import ModuleType
-from typing import Callable, Optional, Sequence, Any
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
 import unittest
-from parameterized import parameterized as _parameterized  # alias for clarity
 
+# Optional: only needed for class-level parameterization
+try:
+    from parameterized import parameterized_class as _parameterized_class
+except Exception:  # pragma: no cover
+    _parameterized_class = None
 
-
-
-# -----------------------------------------------------------------------------
-# Configuration & device detection
-# -----------------------------------------------------------------------------
+# =============================================================================
+# Config / device
+# =============================================================================
 
 NT_TEST_DUT = os.getenv("NT_TEST_DUT", "").strip()
 NT_NUM_GENERATED_CASES = int(os.getenv("NT_NUM_GENERATED_CASES", "4"))
 
+def device_under_test() -> str:
+    """
+    Returns a concrete device string:
+      - "cuda:0" if CUDA is available
+      - "cpu" otherwise
+    Honors NT_TEST_DUT if set (e.g., "cpu", "cuda", "cuda:1").
+    """
+    if NT_TEST_DUT:
+        return "cuda:0" if NT_TEST_DUT == "cuda" else NT_TEST_DUT
+    if torch.cuda.is_available():
+        # pick an explicit index
+        try:
+            idx = torch.cuda.current_device()
+        except Exception:
+            idx = 0
+        return f"cuda:{idx}"
+    return "cpu"
 
-# --- Add this probe right after the imports ---
+# =============================================================================
+# NumPy dtype probe (bf16)
+# =============================================================================
+
 try:
-    _NP_BFLOAT16 = np.dtype("bfloat16")  # will raise on older NumPy
+    _NP_BFLOAT16 = np.dtype("bfloat16")  # may raise on older NumPy
     _HAS_NP_BFLOAT16 = True
 except TypeError:
     _NP_BFLOAT16 = None
     _HAS_NP_BFLOAT16 = False
 
-def device_under_test() -> str:
-    if NT_TEST_DUT:
-        return NT_TEST_DUT
-    if torch.cuda.is_available():
-        return "cuda:0"
-    return "cpu"
-
-# -----------------------------------------------------------------------------
-# Dtype helpers & tolerances
-# -----------------------------------------------------------------------------
+# =============================================================================
+# Type / tolerance helpers
+# =============================================================================
 
 _python_scalar_dtypes = {
     bool: np.dtype("bool"),
@@ -60,7 +78,6 @@ _python_scalar_dtypes = {
 def _dtype(x) -> np.dtype:
     if hasattr(x, "dtype"):
         if isinstance(x, torch.Tensor):
-            # Map torch dtypes to numpy dtypes without going through .numpy() for bf16
             td = x.dtype
             if td is torch.float32:
                 return np.dtype(np.float32)
@@ -69,7 +86,6 @@ def _dtype(x) -> np.dtype:
             if td is torch.float16:
                 return np.dtype(np.float16)
             if td is torch.bfloat16:
-                # Use np.bfloat16 if available; otherwise compare as float32
                 return _NP_BFLOAT16 if _HAS_NP_BFLOAT16 else np.dtype(np.float32)
             if td is torch.int64:
                 return np.dtype(np.int64)
@@ -77,7 +93,7 @@ def _dtype(x) -> np.dtype:
                 return np.dtype(np.int32)
             if td is torch.bool:
                 return np.dtype(np.bool_)
-            # Fallback: go through numpy (works for supported dtypes)
+            # Fallback: coerce to f32 on CPU then infer
             return np.dtype(str(x.detach().cpu().to(torch.float32).numpy().dtype))
         # NumPy array
         return np.dtype(x.dtype)
@@ -86,8 +102,7 @@ def _dtype(x) -> np.dtype:
     else:
         return np.asarray(x).dtype
 
-
-_DEFAULT_TOLERANCE = {
+_DEFAULT_TOLERANCE: Dict[np.dtype, float] = {
     np.dtype(np.bool_): 0.0,
     np.dtype(np.int32): 0.0,
     np.dtype(np.int64): 0.0,
@@ -95,26 +110,20 @@ _DEFAULT_TOLERANCE = {
     np.dtype(np.float32): 5e-3,
     np.dtype(np.float64): 1e-5,
 }
-
-# --- Only register bf16 tolerance if NumPy supports it ---
 if _HAS_NP_BFLOAT16:
     _DEFAULT_TOLERANCE[_NP_BFLOAT16] = 5e-3
-
 
 def _to_numpy(x):
     if isinstance(x, torch.Tensor):
         t = x.detach().cpu()
-        # --- Convert bf16 to f32 if NumPy doesn't support bf16 ---
         if t.dtype is torch.bfloat16 and not _HAS_NP_BFLOAT16:
             t = t.to(torch.float32)
         return t.numpy()
     return np.asarray(x)
 
-
-def _default_tolerance() -> dict[np.dtype, float]:
-    # Keep a TPU branch for completeness; PyTorch doesn't target TPU.
+def _default_tolerance() -> Dict[np.dtype, float]:
     dut = device_under_test()
-    if dut not in ("tpu",):
+    if dut != "tpu":
         return _DEFAULT_TOLERANCE
     tol = _DEFAULT_TOLERANCE.copy()
     tol[np.dtype(np.float32)] = 5e-2
@@ -133,13 +142,13 @@ def update_test_tolerance(f32_tol: float = 5e-3, f64_tol: float = 1e-5):
     _DEFAULT_TOLERANCE[np.dtype(np.float32)] = f32_tol
     _DEFAULT_TOLERANCE[np.dtype(np.float64)] = f64_tol
 
-# -----------------------------------------------------------------------------
-# Parameter generation (sampling cartesian product)
-# -----------------------------------------------------------------------------
+# =============================================================================
+# Case subsetting
+# =============================================================================
 
-_CACHED_INDICES: dict[int, Sequence[int]] = {}
+_CACHED_INDICES: Dict[int, Sequence[int]] = {}
 
-def _cases_from_list(xs):
+def _cases_from_list(xs: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     xs = list(xs)
     n = len(xs)
     if n <= NT_NUM_GENERATED_CASES:
@@ -151,53 +160,151 @@ def _cases_from_list(xs):
         _CACHED_INDICES[n] = indices = rng.permutation(n)
     return [xs[i] for i in indices[:k]]
 
-def product(*kwargs_seqs, **testgrid):
-    """
-    Test case decorator to randomly subset a cartesian product of parameters.
-    Mirrors absltest.parameterized.product behavior.
-    """
+# =============================================================================
+# Parameterization (robust, subTest-based for methods)
+# =============================================================================
+
+def _build_cases(kwargs_seqs: Iterable[Iterable[dict]], **testgrid) -> List[Dict[str, Any]]:
+    # validate named grid
     for name, values in testgrid.items():
         if not isinstance(values, (list, tuple)):
-            raise AssertionError(
-                f"Values of {name} must be list/tuple, found {type(values)}"
-            )
+            raise AssertionError(f"Values of {name} must be list/tuple, found {type(values)}")
 
+    # validate positional sequences of kwargs dicts
     prior_arg_names = set()
     for kwargs_seq in kwargs_seqs:
-        if not (isinstance(kwargs_seq, (list, tuple)) and
-                all(isinstance(kwargs, dict) for kwargs in kwargs_seq)):
-            raise AssertionError(
-                "Positional parameters must be a sequence of kwargs dicts")
+        if not (isinstance(kwargs_seq, (list, tuple)) and all(isinstance(kwargs, dict) for kwargs in kwargs_seq)):
+            raise AssertionError("Positional parameters must be a sequence of kwargs dicts")
         if kwargs_seq:
             arg_names = set(kwargs_seq[0])
             if not all(set(kwargs) == arg_names for kwargs in kwargs_seq):
-                raise AssertionError("All kwargs dicts must share the same keys")
+                raise AssertionError("All kwargs dicts in a positional block must share keys")
             if arg_names & prior_arg_names:
                 dup = sorted(arg_names & prior_arg_names)
-                raise AssertionError(f"Duplicate arg names across sequences: {dup}")
+                raise AssertionError(f"Duplicate arg names across blocks: {dup}")
             prior_arg_names |= arg_names
 
     if prior_arg_names & set(testgrid):
         dup = sorted(prior_arg_names & set(testgrid))
         raise AssertionError(f"Duplicate arg names between positional and named: {dup}")
 
+    # build cartesian list of dict testcases
     testgrid_seq = (tuple({k: v} for v in vs) for k, vs in testgrid.items())
     testgrid_seq = tuple(kwargs_seqs) + tuple(testgrid_seq)
-
-    testcases = [
+    all_cases = [
         dict(itertools.chain.from_iterable(case.items() for case in cases))
         for cases in itertools.product(*testgrid_seq)
     ]
-    return parameters(testcases)
+    return _cases_from_list(all_cases)
 
-
-def parameters(testcases):
+def parameters(testcases: List[Dict[str, Any]]):
+    """
+    METHOD/FUNCTION decorator: run once per dict testcase using subTest(**case).
+    This binds by keyword reliably and avoids parameterized.expand pitfalls.
+    """
     subset = _cases_from_list(testcases)
-    return _parameterized.expand(subset)
 
-# -----------------------------------------------------------------------------
-# Tree utilities
-# -----------------------------------------------------------------------------
+    def _decorator(func):
+        arg_names = [n for n in inspect.signature(func).parameters if n != "self"]
+
+        def _wrapped(self, *_, **__):
+            for i, case in enumerate(subset):
+                missing = [n for n in arg_names if n not in case]
+                if missing:
+                    raise AssertionError(f"Missing keys {missing} in testcase #{i}: {case}")
+                with self.subTest(**case):
+                    func(self, **case)
+
+        _wrapped.__name__ = func.__name__
+        _wrapped.__doc__ = func.__doc__
+        return _wrapped
+
+    return _decorator
+
+def product(*kwargs_seqs, **testgrid):
+    """
+    Universal decorator:
+      - If decorating a CLASS: use parameterized_class (one class per dict).
+      - If decorating a METHOD/FUNCTION: run subTests with kwargs per dict.
+    """
+    subset = _build_cases(kwargs_seqs, **testgrid)
+
+    def _decorator(obj):
+        if inspect.isclass(obj):
+            return _parameterized_class(subset)(obj)
+        else:
+            return parameters(subset)(obj)
+    return _decorator
+
+    return _decorator
+
+
+import inspect
+from typing import Any, Dict, List
+
+def _parameterized_class(cases: List[Dict[str, Any]]):
+    """Return a class decorator that clones the test class per `case` dict."""
+    def _decorator(cls):
+        module = cls.__module__
+        base_name = cls.__name__
+        new_classes = []
+
+        for i, case in enumerate(cases):
+            name = f"{base_name}_{i}"
+            # Build a new dict of attributes/methods for the subclass
+            attrs = dict(cls.__dict__)  # shallow copy
+            # Remove __dict__/__weakref__ descriptors added by type
+            attrs.pop('__dict__', None)
+            attrs.pop('__weakref__', None)
+
+            # Attach case values as class attributes so tests can use self.<key>
+            for k, v in case.items():
+                attrs[k] = v
+
+            # Wrap test methods to pass kwargs if they declare them
+            def _wrap_test(meth, case_dict):
+                if not callable(meth):
+                    return meth
+                if not meth.__name__.startswith("test"):
+                    return meth
+
+                sig = inspect.signature(meth)
+
+                def wrapped(self, *args, **kwargs):
+                    # If method expects keyword params, filter from case
+                    if any(p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                                      inspect.Parameter.KEYWORD_ONLY)
+                           for p in sig.parameters.values() if p.name != "self"):
+                        accepted = {k: v for k, v in case_dict.items() if k in sig.parameters}
+                        return meth(self, **accepted)
+                    # Otherwise, call without injecting kwargs
+                    return meth(self, *args, **kwargs)
+
+                wrapped.__name__ = meth.__name__
+                wrapped.__doc__ = meth.__doc__
+                wrapped.__qualname__ = f"{name}.{meth.__name__}"
+                return wrapped
+
+            for attr_name, attr_val in list(attrs.items()):
+                if attr_name.startswith("test") and callable(attr_val):
+                    attrs[attr_name] = _wrap_test(attr_val, case)
+
+            # Create the subclass
+            new_cls = type(name, (cls,), attrs)
+            new_cls.__module__ = module
+            new_classes.append(new_cls)
+
+            # Inject into the defining module so unittest/pytest discover them
+            m = __import__(module, fromlist=[module.split(".")[-1]])
+            setattr(m, name, new_cls)
+
+        # Return a benign placeholder (the original class won’t be collected)
+        return None
+    return _decorator
+
+# =============================================================================
+# Simple pytree helpers
+# =============================================================================
 
 def _is_sequence(x) -> bool:
     try:
@@ -223,18 +330,13 @@ def _tree_zip(x, y):
     elif _is_sequence(x) and not hasattr(x, "__array__"):
         assert _is_sequence(y) and not hasattr(y, "__array__")
         assert len(x) == len(y)
-        return type(x)( _tree_zip(a, b) for a, b in zip(x, y) )
+        return type(x)(_tree_zip(a, b) for a, b in zip(x, y))
     else:
         return (x, y)
 
-# -----------------------------------------------------------------------------
-# Assertion helpers (NumPy semantics, Torch-aware)
-# -----------------------------------------------------------------------------
-
-def _to_numpy(x):
-    if isinstance(x, torch.Tensor):
-        return x.detach().cpu().numpy()
-    return np.asarray(x)
+# =============================================================================
+# Assertions
+# =============================================================================
 
 def _assert_numpy_allclose(
     a: np.ndarray,
@@ -249,15 +351,10 @@ def _assert_numpy_allclose(
     with np.errstate(invalid="ignore"):
         np.testing.assert_allclose(a, b, **kw, err_msg=err_msg)
 
-# -----------------------------------------------------------------------------
-# TestCase
-# -----------------------------------------------------------------------------
-
 class NeuralTangentsTestCase(unittest.TestCase):
 
     def assertDtypesMatch(self, x, y, *, canonicalize_dtypes: bool = True):
         dx, dy = _dtype(x), _dtype(y)
-        # PyTorch does not have a global x64 toggle like JAX; we keep canonicalization trivial.
         if canonicalize_dtypes:
             self.assertEqual(np.dtype(dx), np.dtype(dy))
         else:
@@ -321,103 +418,149 @@ class NeuralTangentsTestCase(unittest.TestCase):
             raise TypeError((type(x), type(y)))
 
     def assertAllClose(
-        self,
-        x,
-        y,
-        *,
-        check_dtypes: bool = True,
-        atol: Optional[float] = None,
-        rtol: Optional[float] = None,
-        canonicalize_dtypes: bool = True,
-        check_finite: bool = True,
-        err_msg: str = ""
+            self,
+            x,
+            y,
+            *,
+            check_dtypes: bool = True,
+            atol: Optional[float] = None,
+            rtol: Optional[float] = None,
+            canonicalize_dtypes: bool = True,
+            check_finite: bool = True,
+            err_msg: str = "",
     ):
-        if check_finite:
-            def _is_finite(z):
-                if isinstance(z, torch.Tensor):
-                    self.assertTrue(torch.isfinite(z).all())
-                elif hasattr(z, "__array__"):
-                    self.assertTrue(np.isfinite(np.asarray(z)).all())
-                elif np.isscalar(z):
-                    self.assertTrue(np.isfinite(z))
-                return z
-            _tree_map(_is_finite, x)
-            _tree_map(_is_finite, y)
+        """
+        Dataclass-aware deep allclose:
+          - Recurses through dict / list / tuple
+          - For dataclasses, only recurses into fields with metadata pytree_node=True (default)
+          - Leaves (torch.Tensor | numpy array | scalar) are compared with per-dtype tolerances
+          - Optional finiteness pre-check over leaves only
+        """
 
-        def _close(a, b):
-            self._assertAllClose(
-                a, b,
-                check_dtypes=check_dtypes,
-                atol=atol,
-                rtol=rtol,
-                canonicalize_dtypes=canonicalize_dtypes,
-                err_msg=err_msg,
-            )
+        # ---------- helpers ----------
+        def _is_sequence(v) -> bool:
+            # Only treat plain list/tuple as sequences; avoid iterating custom classes/dataclasses.
+            return isinstance(v, (list, tuple))
 
-        # dataclass support
-        if dataclasses.is_dataclass(x):
-            self.assertIs(type(y), type(x))
-            for field in dataclasses.fields(x):
-                key = field.name
-                x_value, y_value = getattr(x, key), getattr(y, key)
-                is_pytree_node = field.metadata.get("pytree_node", True)
-                if is_pytree_node:
-                    _close(x_value, y_value)
+        def _finite_leaf(z):
+            if isinstance(z, torch.Tensor):
+                self.assertTrue(torch.isfinite(z).all(), "Non-finite values in tensor leaf.")
+            elif hasattr(z, "__array__"):
+                self.assertTrue(np.isfinite(np.asarray(z)).all(), "Non-finite values in array leaf.")
+            elif np.isscalar(z):
+                self.assertTrue(np.isfinite(z), "Non-finite scalar.")
+            return z
+
+        def _finite_traverse(z):
+            if dataclasses.is_dataclass(z):
+                for field in dataclasses.fields(z):
+                    if field.metadata.get("pytree_node", True):
+                        _finite_traverse(getattr(z, field.name))
+                return
+            if isinstance(z, dict):
+                for v in z.values():
+                    _finite_traverse(v)
+                return
+            if _is_sequence(z) and not hasattr(z, "__array__"):
+                for v in z:
+                    _finite_traverse(v)
+                return
+            _finite_leaf(z)
+
+        def _cmp_leaves(a, b):
+            # Compare leaves with dtype-aware tolerances and optional dtype checks.
+            ax, ay = _to_numpy(a), _to_numpy(b)
+            self.assertEqual(ax.shape, ay.shape, f"Shape mismatch: {ax.shape} vs {ay.shape}. {err_msg}")
+            atol_eff = max(_tolerance(_dtype(ax), atol), _tolerance(_dtype(ay), atol))
+            rtol_eff = max(_tolerance(_dtype(ax), rtol), _tolerance(_dtype(ay), rtol))
+            _assert_numpy_allclose(ax, ay, atol=atol_eff, rtol=rtol_eff, err_msg=err_msg)
+            if check_dtypes:
+                dx, dy = _dtype(a), _dtype(b)
+                if canonicalize_dtypes:
+                    self.assertEqual(np.dtype(dx), np.dtype(dy), f"Dtype mismatch: {dx} vs {dy}. {err_msg}")
                 else:
-                    self.assertEqual(x_value, y_value, key)
-        else:
-            _close(x, y)
+                    self.assertEqual(dx, dy, f"Dtype mismatch: {dx} vs {dy}. {err_msg}")
 
-# -----------------------------------------------------------------------------
-# Vectorization & "pmap" stubs
-# -----------------------------------------------------------------------------
+        def _assert_close(a, b):
+            # Dataclass (e.g., Kernel): recurse into pytree_node fields
+            if dataclasses.is_dataclass(a):
+                self.assertIs(type(a), type(b), f"Dataclass types differ: {type(a)} vs {type(b)}. {err_msg}")
+                for field in dataclasses.fields(a):
+                    name = field.name
+                    a_val, b_val = getattr(a, name), getattr(b, name)
+                    if field.metadata.get("pytree_node", True):
+                        _assert_close(a_val, b_val)
+                    else:
+                        self.assertEqual(a_val, b_val, f"Non-pytree field `{name}` mismatch. {err_msg}")
+                return
+
+            # Dict
+            if isinstance(a, dict):
+                self.assertIsInstance(b, dict, f"Type mismatch: dict vs {type(b)}. {err_msg}")
+                self.assertEqual(set(a.keys()), set(b.keys()), f"Dict keys differ. {err_msg}")
+                for k in a:
+                    _assert_close(a[k], b[k])
+                return
+
+            # Sequence (list/tuple)
+            if _is_sequence(a) and not hasattr(a, "__array__"):
+                self.assertTrue(_is_sequence(b) and not hasattr(b, "__array__"),
+                                f"Type mismatch: sequence vs {type(b)}. {err_msg}")
+                self.assertEqual(len(a), len(b), f"Sequence lengths differ. {err_msg}")
+                for ae, be in zip(a, b):
+                    _assert_close(ae, be)
+                return
+
+            # Leaves: tensors/ndarrays/scalars
+            if isinstance(a, torch.Tensor) or hasattr(a, "__array__") or np.isscalar(a):
+                self.assertTrue(isinstance(b, torch.Tensor) or hasattr(b, "__array__") or np.isscalar(b),
+                                f"Leaf type mismatch: {type(a)} vs {type(b)}. {err_msg}")
+                _cmp_leaves(a, b)
+                return
+
+            # Fallback to equality for other comparable types.
+            self.assertEqual(a, b, f"Values differ: {a} vs {b}. {err_msg}")
+
+        # ---------- run ----------
+        if check_finite:
+            _finite_traverse(x)
+            _finite_traverse(y)
+
+        _assert_close(x, y)
+
+
+# =============================================================================
+# Vectorization & pseudo-pmap
+# =============================================================================
 
 def _has_torch_vmap() -> bool:
     return hasattr(torch, "vmap")
 
 def _jit_vmap(f: Callable) -> Callable:
-    """
-    In JAX this is jit(vmap(f)).
-    In PyTorch we provide:
-      - If torch.vmap exists, return torch.vmap(f).
-      - Otherwise, return a wrapper that maps f over the leading batch dim.
-    """
     if _has_torch_vmap():
         return torch.vmap(f)
 
     def _wrapper(*args, **kwargs):
-        # Assume first tensor argument has batch dim on dim 0
-        # Map f over leading dimension by simple Python loop + stack
-        # Works for small batch sizes in tests.
-        # Find batch size from first tensor-like arg
         bs = None
-        flat_args = list(args)
-        for a in flat_args:
+        for a in args:
             if isinstance(a, torch.Tensor):
                 bs = a.shape[0]
                 break
         if bs is None:
-            # No tensor inputs; just call once
             return f(*args, **kwargs)
         outs = []
         for i in range(bs):
             sliced = []
-            for a in flat_args:
+            for a in args:
                 if isinstance(a, torch.Tensor) and a.shape[:1] == (bs,):
                     sliced.append(a[i])
                 else:
                     sliced.append(a)
             outs.append(f(*sliced, **kwargs))
-        # Stack outputs if tensor; else return list
-        if isinstance(outs[0], torch.Tensor):
-            return torch.stack(outs, dim=0)
-        return outs
+        return torch.stack(outs, dim=0) if isinstance(outs[0], torch.Tensor) else outs
     return _wrapper
 
 def stub_out_pmap(batch: ModuleType, count: int):
-    """
-    Simulate JAX pmap with vmap on CPU/CUDA.
-    """
     if count > 0:
         class torch_device_stub:
             def device_count(self) -> int:
@@ -427,9 +570,9 @@ def stub_out_pmap(batch: ModuleType, count: int):
             batch.pmap = _jit_vmap
             batch.xla_bridge = torch_device_stub()
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 # Logging & matrix closeness
-# -----------------------------------------------------------------------------
+# =============================================================================
 
 def _log(relative_error: float, absolute_error: float, expected, actual, did_pass: bool):
     msg = "PASSED" if did_pass else "FAILED"
@@ -448,9 +591,7 @@ def _log(relative_error: float, absolute_error: float, expected, actual, did_pas
 
 def assert_close_matrices(self: unittest.TestCase, expected, actual, rtol: float, atol: float = 0.1):
     def _to_tensor(z) -> torch.Tensor:
-        if isinstance(z, torch.Tensor):
-            return z
-        return torch.as_tensor(z)
+        return z if isinstance(z, torch.Tensor) else torch.as_tensor(z)
 
     def _assert_close(e, a):
         e_t, a_t = _to_tensor(e).detach(), _to_tensor(a).detach()
@@ -460,24 +601,14 @@ def assert_close_matrices(self: unittest.TestCase, expected, actual, rtol: float
         denom = denom if denom > 1e-12 else torch.tensor(1e-12, device=e_t.device, dtype=e_t.dtype)
         relative_error = (torch.linalg.norm(diff) / denom).item()
         absolute_error = torch.mean(torch.abs(diff)).item()
-
-        if (np.isnan(relative_error) or
-            relative_error > rtol or
-            absolute_error > atol):
+        if (np.isnan(relative_error) or relative_error > rtol or absolute_error > atol):
             _log(relative_error, absolute_error, e_t, a_t, False)
-            self.fail(
-                self.failureException(
-                    "Relative ERROR: ",
-                    float(relative_error),
-                    "EXPECTED:" + " " * 50,
-                    e_t,
-                    "ACTUAL:" + " " * 50,
-                    a_t,
-                    " " * 50,
-                    "Absolute ERROR: ",
-                    float(absolute_error),
-                )
-            )
+            self.fail(self.failureException(
+                "Relative ERROR: ", float(relative_error),
+                "EXPECTED:" + " " * 50, e_t,
+                "ACTUAL:" + " " * 50, a_t,
+                " " * 50, "Absolute ERROR: ", float(absolute_error),
+            ))
         else:
             _log(relative_error, absolute_error, e_t, a_t, True)
 
@@ -489,42 +620,61 @@ def assert_close_matrices(self: unittest.TestCase, expected, actual, rtol: float
             raise TypeError("Tree structure mismatch.")
     _tree_map(_apply, xz)
 
-# -----------------------------------------------------------------------------
-# Skipping utility
-# -----------------------------------------------------------------------------
+# =============================================================================
+# Skips
+# =============================================================================
 
 def skip_test(
     self: unittest.TestCase,
     msg: str = "Skipping large tests for speed.",
-    platforms: tuple[str, ...] = ("cpu",)
+    platforms: Tuple[str, ...] = ("cpu",)
 ):
     if device_under_test() in platforms:
         raise unittest.SkipTest(msg)
 
-# -----------------------------------------------------------------------------
+# =============================================================================
+# RNG helper for mask (device-aware generator)
+# =============================================================================
+
+def _ensure_generator_on(gen: Optional[torch.Generator | int], device: torch.device | str) -> Optional[torch.Generator]:
+    if gen is None:
+        return None
+    dev = torch.device(device)
+    if isinstance(gen, int):
+        g = torch.Generator(device=dev)
+        g.manual_seed(int(gen))
+        return g
+    if isinstance(gen, torch.Generator):
+        gdev = getattr(gen, "device", torch.device("cpu"))
+        if torch.device(gdev).type == dev.type:
+            return gen
+        seed = gen.initial_seed() if hasattr(gen, "initial_seed") else int(torch.seed())
+        g = torch.Generator(device=dev)
+        g.manual_seed(seed)
+        return g
+    raise TypeError(f"Unsupported generator type: {type(gen)}")
+
+# =============================================================================
 # Masking utility
-# -----------------------------------------------------------------------------
+# =============================================================================
 
 def mask(
     x: torch.Tensor,
     mask_constant: Optional[float],
     mask_axis: Sequence[int],
-    key: Optional[torch.Generator],
-    p: float
+    gen: Optional[torch.Generator] = None,  # NOTE: named 'gen' to match call sites in tests
+    p: float = 0.5
 ) -> torch.Tensor:
     """
     Replaces entries along mask_axis with mask_constant with prob p and sorts dim=1.
-    `key` is an optional torch.Generator for reproducibility.
+    `gen` is an optional torch.Generator for reproducibility (device-aware).
     """
     if mask_constant is not None:
         mask_shape = [1 if i in mask_axis else s for i, s in enumerate(x.shape)]
-        if key is None:
-            mask_mat = torch.bernoulli(torch.full(mask_shape, p, device=x.device, dtype=x.dtype)).to(torch.bool)
-        else:
-            probs = torch.full(mask_shape, p, device=x.device, dtype=x.dtype)
-            mask_mat = torch.bernoulli(probs, generator=key).to(torch.bool)
+        probs = torch.full(mask_shape, p, device=x.device, dtype=x.dtype)
+        g = _ensure_generator_on(gen, x.device)
+        mask_mat = torch.bernoulli(probs, generator=g).to(torch.bool)
         x = torch.where(mask_mat, torch.as_tensor(mask_constant, dtype=x.dtype, device=x.device), x)
-        # Following the original: sort along dim=1
         if x.dim() >= 2:
             x, _ = torch.sort(x, dim=1)
     return x

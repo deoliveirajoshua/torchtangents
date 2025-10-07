@@ -17,7 +17,7 @@ class ElementwiseTest(test_utils.NeuralTangentsTestCase):
 
     def test_elementwise(self):
         # Preserve original call style; switch to elementwise.main() if no args.
-        elementwise.main(None)
+        elementwise.main()
 
 if __name__ == "__main__":
     unittest.main()

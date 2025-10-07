@@ -3295,56 +3295,46 @@ def _diag_mul(
 
 
 def _vmap_2d(
-    fn: Callable[[float, float, float], float],
+    fn: Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor],
     cov12: torch.Tensor,
     var1: torch.Tensor,
     var2: Optional[torch.Tensor],
     diagonal_batch: bool,
-    diagonal_spatial: bool,
+    diagonal_spatial: bool
 ) -> torch.Tensor:
     """
-    Effectively a "2D vmap" of `fn(cov12, var1, var2)` with the same
-    layout/shape semantics as the JAX version.
-
-    NOTE: `fn` should support Torch tensor inputs (0-d tensors). If it only
-    uses Python math, wrap those with torch ops.
+    Torch version of the JAX helper. Ensures var1/var2 broadcast with the
+    2D block of cov12 by reshaping to (..., P, 1) and (..., 1, Q).
     """
-    try:
-        from torch.func import vmap  # PyTorch 2.x
-    except Exception:                # functorch fallback
-        from functorch import vmap
-
+    # Determine how many batch axes are retained in cov12
     batch_ndim = 1 if diagonal_batch else 2
     start = 2 - batch_ndim
     cov_end = batch_ndim if diagonal_spatial else cov12.ndim
 
-    # Flatten the pair of spatial axes we map over into a single axis at `start`.
-    _cov12 = utils.make_2d(cov12, start, cov_end)
+    # Make the central block of cov12 into a 2D (P, Q) grid
+    _cov12 = utils.make_2d(cov12, start, cov_end)  # shape: (..., P, Q)
 
+    # Flatten the corresponding var blocks to match P and Q
     var_end = 1 if diagonal_spatial else var1.ndim
-    var1 = var1.reshape(var1.shape[:start] + (-1,) + var1.shape[var_end:])
-    var2 = var1 if var2 is None else var2.reshape(
-        var2.shape[:start] + (-1,) + var2.shape[var_end:]
-    )
+    v1_flat = var1.reshape(var1.shape[:start] + (-1,) + var1.shape[var_end:])  # (..., P)
+    if var2 is None:
+        v2_flat = v1_flat  # symmetric case; Q == P when x2 is None
+    else:
+        v2_flat = var2.reshape(var2.shape[:start] + (-1,) + var2.shape[var_end:])  # (..., Q)
 
-    # Wrap `fn` so it always returns a tensor on the correct device/dtype.
-    def _fn_wrapped(c, v1, v2):
-        out = fn(c, v1, v2)
-        if not torch.is_tensor(out):
-            out = torch.as_tensor(out, dtype=c.dtype, device=c.device)
-        return out
+    # Align for broadcasting against (..., P, Q)
+    v1 = v1_flat.unsqueeze(-1)  # (..., P, 1)
+    v2 = v2_flat.unsqueeze(-2)  # (..., 1, Q)
 
-    # Inner vmap maps over the "j" axis; outer vmap maps over the "i" axis.
-    inner = vmap(_fn_wrapped, in_dims=(start, None, start), out_dims=start)
-    outer = vmap(inner,       in_dims=(start, start, None), out_dims=start)
-    out = outer(_cov12, var1, var2)
+    # Call the provided function; expect it to broadcast over (..., P, Q)
+    out = fn(_cov12, v1, v2)
 
-    # Restore original `cov12` shape.
+    # Restore the original (interleaved) spatial layout and full shape
     out_shape = (
-        cov12.shape[:start]
-        + cov12.shape[start:cov_end:2]
-        + cov12.shape[start + 1:cov_end:2]
-        + cov12.shape[cov_end:]
+        cov12.shape[:start] +
+        cov12.shape[start:cov_end:2] +
+        cov12.shape[start + 1:cov_end:2] +
+        cov12.shape[cov_end:]
     )
     out = out.reshape(out_shape)
     out = utils.zip_axes(out, start, cov_end)

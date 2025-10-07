@@ -27,6 +27,7 @@ import warnings
 
 import numpy as np
 import torch
+from torch.utils import _pytree as _pytree
 
 PyTree = Any
 Axes = Union[int, Sequence[int]]
@@ -329,24 +330,56 @@ def _zip_axes(
     end_axis: Optional[int] = None,
     unzip: bool = False
 ) -> torch.Tensor:
-    """Zip/unzip (interleave/de-interleave) axes starting from `start_axis`."""
+    """
+    Interleave (zip) or de-interleave (unzip) axes in x[start_axis:end_axis].
+
+    If `unzip=False`:
+      (B, s1, s2, ..., sk,  s1, s2, ..., sk)  ->  (B, s1, s1, s2, s2, ..., sk, sk)
+       ^^^^^^^^^ left block ^^^^^^^^^^^^^^^       ^^^^^^^^^^^^^^^^^ interleaved ^^^^^^^^^^^^^^^^^
+    If `unzip=True`, performs the inverse.
+
+    Works for any number of preceding/following axes and handles degenerate cases.
+    """
+    nd = x.ndim
     if end_axis is None:
-        end_axis = x.ndim
+        end_axis = nd
 
-    half_ndim, ragged = divmod(end_axis - start_axis, 2)
-    if ragged:
-        raise ValueError(
-            f'Need even number of axes to zip, got {end_axis - start_axis}.')
+    # normalize negatives
+    if start_axis < 0: start_axis += nd
+    if end_axis < 0: end_axis += nd
+    if not (0 <= start_axis <= end_axis <= nd):
+        raise ValueError(f"Invalid axis range [{start_axis}, {end_axis}) for ndim={nd}.")
 
-    odd_axes = range(start_axis + 1, end_axis, 2)
-    last_axes = range(end_axis - half_ndim, end_axis)
+    span = end_axis - start_axis
+    if span == 0:
+        return x  # nothing to do
+    if span % 2 == 1:
+        raise ValueError(f"Need even number of axes to zip/unzip, got {span}.")
 
-    print(f"odd_axes = {list(odd_axes)}, last_axes = {list(last_axes)}")
+    # Build permutation by reordering the positions in [start_axis:end_axis]
+    perm = list(range(nd))
+    block = perm[start_axis:end_axis]
+
     if unzip:
-        x = torch.movedim(x, odd_axes, last_axes)
+        # Current block is interleaved: [l0,r0,l1,r1,...] -> restore to [l0,l1,..., r0,r1,...]
+        left  = block[::2]
+        right = block[1::2]
+        new_block = left + right
     else:
-        x = torch.movedim(x, last_axes, odd_axes)
-    return x
+        # Current block is unzipped: [l0,l1,..., r0,r1,...] -> interleave to [l0,r0,l1,r1,...]
+        half = span // 2
+        left  = block[:half]
+        right = block[half:]
+        new_block = [v for pair in zip(left, right) for v in pair]
+
+    perm[start_axis:end_axis] = new_block
+    return x.permute(perm)
+
+def zip_axes(x: torch.Tensor, start_axis: int = 0, end_axis: Optional[int] = None) -> torch.Tensor:
+    return _zip_axes(x, start_axis, end_axis, unzip=False)
+
+def unzip_axes(x: torch.Tensor, start_axis: int = 0, end_axis: Optional[int] = None) -> torch.Tensor:
+    return _zip_axes(x, start_axis, end_axis, unzip=True)
 
 
 def diagonal_between(
@@ -637,3 +670,29 @@ _T = TypeVar('_T')
 
 def double_tuple(x: Iterable[_T]) -> tuple[_T, ...]:
     return tuple(v for v in x for _ in range(2))
+
+
+def tree_flatten(x):
+    if _pytree is None:
+        raise AttributeError("tree_flatten requires torch>=2.0 (_pytree).")
+    leaves, ctx = _pytree.tree_flatten(x)
+    return leaves, ctx
+
+def tree_unflatten(ctx, leaves):
+    if _pytree is None:
+        raise AttributeError("tree_unflatten requires torch>=2.0 (_pytree).")
+    return _pytree.tree_unflatten(leaves, ctx)
+
+def tree_map(fn, *trees):
+    if _pytree is None:
+        # simple fallback: assume single tree
+        def _map(t):
+            if isinstance(t, dict):
+                return {k: _map(v) for k, v in t.items()}
+            if isinstance(t, (list, tuple)):
+                typ = type(t)
+                return typ(_map(v) for v in t)
+            return fn(t)
+        assert len(trees) == 1
+        return _map(trees[0])
+    return _pytree.tree_map(fn, *trees)

@@ -23,7 +23,7 @@ class WeightSpaceTest(test_utils.NeuralTangentsTestCase):
     def test_weight_space(self):
         # Keep signature parity with the original: main(None)
         # (If your PyTorch main() takes no args, just call weight_space.main().)
-        weight_space.main(None)
+        weight_space.main()
 
 
 if __name__ == "__main__":

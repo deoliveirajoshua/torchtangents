@@ -125,33 +125,80 @@ def _set_cov2_to_none(k):
         k = k.replace(cov2=None)
     return k
 
+import math
+import warnings
+from typing import Tuple, Union, Optional
+
 def _get_n_batches_and_batch_sizes(
     n1: int,
     n2: int,
-    batch_size: int,
+    batch_size: Union[int, str, None],
     device_count: int
 ) -> Tuple[int, int, int, int]:
-    # mirror original constraints
-    max_serial_batch_size = math.gcd(n1, n2) // max(device_count, 1)
-    print(f"batch_size: {batch_size} | max_serial_batch_size: {max_serial_batch_size}")
-    n2_batch_size = min(batch_size, max_serial_batch_size)
-    if n2_batch_size != batch_size:
-        warnings.warn(
-            f'Batch size reduced from requested {batch_size} to effective {n2_batch_size} to fit the dataset.'
-        )
-    n1_batch_size = n2_batch_size * max(device_count, 1)
+    """
+    Determine (n1_batches, n1_batch_size, n2_batches, n2_batch_size).
 
+    Semantics:
+      • If `batch_size` is None / <=0 / a string sentinel (e.g. "auto", "batch_size"),
+        pick the maximal safe serial batch size:
+            n2_batch_size = gcd(n1, n2) // device_count  (at least 1)
+        (no warnings).
+
+      • If `batch_size` is a positive int, try to honor it; if it doesn’t fit,
+        reduce it to the largest feasible size and emit:
+            warnings.warn(
+              f"Batch size reduced from requested {batch_size} to effective {n2_batch_size} to fit the dataset."
+            )
+
+      • We always enforce:
+            n1 % (n2_batch_size * device_count) == 0
+            n2 %  n2_batch_size               == 0
+        and raise the same ValueErrors you showed if those fail (shouldn’t in practice).
+    """
+    dc = max(int(device_count or 1), 1)
+    # Max feasible per-serial batch size that satisfies both constraints.
+    # (Any feasible n2_bs must divide this.)
+    max_serial_bs = max(math.gcd(n1, n2) // dc, 1)
+
+    # Detect "auto" modes
+    is_auto = (
+        batch_size is None
+        or (isinstance(batch_size, int) and batch_size <= 0)
+        or isinstance(batch_size, str)  # e.g. "auto", "batch_size"
+    )
+
+    if is_auto:
+        n2_batch_size = max_serial_bs
+    else:
+        if not isinstance(batch_size, int) or batch_size <= 0:
+            raise TypeError(f"batch_size must be a positive int, str, or None; got {batch_size!r}")
+
+        # Cap to the feasible maximum, then ensure divisibility.
+        # The largest feasible divisor ≤ requested is gcd(requested, max_serial_bs).
+        requested = batch_size
+        n2_batch_size = math.gcd(requested, max_serial_bs)
+
+        if n2_batch_size != requested:
+            warnings.warn(
+                f'Batch size reduced from requested {requested} to effective {n2_batch_size} to fit the dataset.'
+            )
+
+    n1_batch_size = n2_batch_size * dc
+
+    # Compute batch counts and enforce exact divisibility (original error messages).
     n1_batches, rag1 = divmod(n1, n1_batch_size)
     if rag1:
         msg = (f'Number of rows must divide batch size. Found n1={n1}, batch_size={n1_batch_size}.')
-        if device_count > 1:
-            msg += f' Device parallelism expands batch size by {device_count}.'
+        if dc > 1:
+            msg += f' Device parallelism expands batch size by {dc}.'
         raise ValueError(msg)
 
     n2_batches, rag2 = divmod(n2, n2_batch_size)
     if rag2:
         raise ValueError(f'Number of cols must divide batch size. Found n2={n2}, batch_size={n2_batch_size}.')
+
     return n1_batches, n1_batch_size, n2_batches, n2_batch_size
+
 
 # ------------------------
 # public entry
@@ -193,7 +240,7 @@ def batch(
 
 def _serial(
     kernel_fn: _KernelFn,
-    batch_size: int,
+    batch_size: Union[int, str, None],
     store_on_device: bool = True
 ) -> _KernelFn:
 

@@ -28,6 +28,23 @@ from .requirements import (
 # Numerics helpers
 # -----------------------
 
+def _align_vars_for_cov2d(cov12: torch.Tensor,
+                          var1: torch.Tensor,
+                          var2: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Ensure var1 and var2 broadcast with cov12 (..., P, Q):
+      var1 -> (..., P, 1), var2 -> (..., 1, Q) when needed.
+    If they are already aligned (e.g., (..., P, 1) / (..., 1, Q)), leave as-is.
+    """
+    if cov12.ndim >= 2:
+        # align var1 with axis -2 and var2 with axis -1
+        if var1.ndim == cov12.ndim - 1:
+            var1 = var1.unsqueeze(-1)  # (..., P, 1)
+        if var2.ndim == cov12.ndim - 1:
+            var2 = var2.unsqueeze(-2)  # (..., 1, Q)
+    return var1, var2
+
+
 def _sqrt(x: torch.Tensor, tol: float = 0.0) -> torch.Tensor:
     # Safe sqrt with clamp; autograd works fine in Torch
     if tol > 0:
@@ -68,7 +85,7 @@ def _grad_wrt_cov12(
     (g,) = torch.autograd.grad(y.sum(), cov12_req, retain_graph=False, create_graph=False, allow_unused=False)
     return g
 
-# Vectorized 2D “vmap” that relies on broadcasted elementwise fn (Torch ops)
+
 def _vmap_2d(
     fn: Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor],
     cov12: torch.Tensor,
@@ -78,19 +95,33 @@ def _vmap_2d(
     diagonal_spatial: bool
 ) -> torch.Tensor:
     """
-    Torch version of the JAX helper. Assumes `fn` supports broadcasted tensors.
-    Shapes/layouts match your utils.make_2d / utils.zip_axes conventions.
+    Torch version of the JAX helper. Ensures var1/var2 broadcast with the
+    2D block of cov12 by reshaping to (..., P, 1) and (..., 1, Q).
     """
+    # Determine how many batch axes are retained in cov12
     batch_ndim = 1 if diagonal_batch else 2
     start = 2 - batch_ndim
     cov_end = batch_ndim if diagonal_spatial else cov12.ndim
-    _cov12 = utils.make_2d(cov12, start, cov_end)
 
+    # Make the central block of cov12 into a 2D (P, Q) grid
+    _cov12 = utils.make_2d(cov12, start, cov_end)  # shape: (..., P, Q)
+
+    # Flatten the corresponding var blocks to match P and Q
     var_end = 1 if diagonal_spatial else var1.ndim
-    var1 = var1.reshape(var1.shape[:start] + (-1,) + var1.shape[var_end:])
-    var2 = var1 if var2 is None else var2.reshape(var2.shape[:start] + (-1,) + var2.shape[var_end:])
+    v1_flat = var1.reshape(var1.shape[:start] + (-1,) + var1.shape[var_end:])  # (..., P)
+    if var2 is None:
+        v2_flat = v1_flat  # symmetric case; Q == P when x2 is None
+    else:
+        v2_flat = var2.reshape(var2.shape[:start] + (-1,) + var2.shape[var_end:])  # (..., Q)
 
-    out = fn(_cov12, var1, var2)  # rely on broadcasting
+    # Align for broadcasting against (..., P, Q)
+    v1 = v1_flat.unsqueeze(-1)  # (..., P, 1)
+    v2 = v2_flat.unsqueeze(-2)  # (..., 1, Q)
+
+    # Call the provided function; expect it to broadcast over (..., P, Q)
+    out = fn(_cov12, v1, v2)
+
+    # Restore the original (interleaved) spatial layout and full shape
     out_shape = (
         cov12.shape[:start] +
         cov12.shape[start:cov_end:2] +
