@@ -54,8 +54,9 @@ def _split_generator(gen: torch.Generator) -> Tuple[torch.Generator, torch.Gener
     """Deterministically split a torch.Generator into (gen, new_child)."""
     # Draw a new seed from `gen` and create a child generator.
     # This keeps things purely PyTorch and compile-friendly.
+    gen = gen.manual_seed(gen.initial_seed()) if gen.device.type != 'cpu' else gen
     dev = _generator_device(gen)
-    seed = int(torch.randint(0, 2**63 - 1, (1,), generator=gen).item())
+    seed = int(torch.randint(0, 2**63 - 1, (1,), generator=gen, device=gen.device).item())
     child = torch.Generator(device=dev)
     child.manual_seed(seed)
     # return original for further use (already advanced), and the child

@@ -477,6 +477,7 @@ class ABReluTest(test_utils.NeuralTangentsTestCase):
         device = test_utils.device_under_test()
         g = _rng(device, 1)
         X0_1 = _randn((3, 2), g)
+        X0_1 = X0_1.to(device)
         fc = stax.Dense(5, 1, 0)
         init_fn, apply_relu, kernel_fn_relu = stax.serial(fc, stax.Relu())
         _, params = init_fn(g, X0_1.shape)
@@ -501,6 +502,7 @@ class ABReluTest(test_utils.NeuralTangentsTestCase):
         device = test_utils.device_under_test()
         g = _rng(device, 1)
         X0_1 = _randn((3, 2), g)
+        X0_1 = X0_1.to(device)
         fc = stax.Dense(5, 1, 0)
         X0_2 = None if same_inputs else _randn((4, 2), g)
 

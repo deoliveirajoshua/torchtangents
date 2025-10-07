@@ -98,7 +98,9 @@ def gradient_descent_mse(
             if fx_train_0 is not None:
                 dfx_train = expm1_fn(rhs, t).reshape(shape)
                 dfx_train = torch.movedim(dfx_train, last_t_axes, trace_axes)
-                fx_train_t = fx_train_0.unsqueeze(first_t_axes).expand_as(dfx_train) + dfx_train
+                for dim in reversed(first_t_axes):
+                    fx_train_0 = fx_train_0.unsqueeze(dim)
+                fx_train_t = fx_train_0.expand_as(dfx_train) + dfx_train
 
             if fx_test_0 is not None:
                 dfx_test = inv_expm1_fn(rhs, t).reshape(shape)
@@ -108,7 +110,9 @@ def gradient_descent_mse(
                     tuple(range(n_non_t_axes, n_non_t_axes + t_ndim)) + last_t_axes,
                     tuple(range(t_ndim)) + trace_axes,
                 )
-                fx_test_t = fx_test_0.unsqueeze(first_t_axes).expand_as(dfx_test) + dfx_test
+                for dim in reversed(first_t_axes):
+                    fx_test_0 = fx_test_0.unsqueeze(dim)
+                fx_test_t = fx_test_0.expand_as(dfx_test) + dfx_test
 
             if fx_train_0 is not None and fx_test_0 is not None:
                 return fx_train_t, fx_test_t

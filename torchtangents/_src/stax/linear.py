@@ -571,6 +571,8 @@ def Dense(
     # ---- apply fn ----
     def apply_fn(params, inputs: torch.Tensor, **kwargs):
         W, b = params
+        W = W.to(inputs.device)
+        b = b.to(inputs.device) if b is not None else None
         # prod has shape like inputs but with channel dim replaced by out_dim.
         prod = torch.tensordot(W, inputs, dims=([0], [channel_axis]))
         prod = torch.movedim(prod, 0, channel_axis)

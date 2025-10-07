@@ -21,7 +21,7 @@ import torch
 
 def _accuracy(y, y_hat):
   """Compute the accuracy of the predictions with respect to one-hot labels."""
-  return torch.mean(torch.argmax(y, axis=1) == torch.argmax(y_hat, axis=1))
+  return torch.mean((torch.argmax(y, axis=1) == torch.argmax(y_hat, axis=1)).float())
 
 
 def print_summary(name, labels, net_p, lin_p, loss):

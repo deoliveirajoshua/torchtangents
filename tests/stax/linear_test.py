@@ -907,9 +907,9 @@ class DotGeneralTest(test_utils.NeuralTangentsTestCase):
         mask_constant = 10.0
 
         def get_k(x1_, x2_, m1, m2):
-            x1m = torch.where(m1, torch.tensor(mask_constant, dtype=x1_.dtype), x1_)
-            x2m = torch.where(m2, torch.tensor(mask_constant, dtype=x2_.dtype), x2_)
-            k_fn = stax.DotGeneral(rhs=torch.ones(x1m.shape[:-1]), dimension_numbers=(((1,), (1,)), ((2,), (2,))))[2]
+            x1m = torch.where(m1, torch.tensor(mask_constant, dtype=torch.float32), x1_.to(torch.float32))
+            x2m = torch.where(m2, torch.tensor(mask_constant, dtype=torch.float32), x2_.to(torch.float32))
+            k_fn = stax.DotGeneral(rhs=torch.ones(x1m.shape[:-1], dtype=torch.float32), dimension_numbers=(((1,), (1,)), ((2,), (2,))))[2]
             return k_fn(x1m, x2m, 'nngp', mask_constant=mask_constant)
 
         m1 = torch.zeros_like(x1, dtype=torch.bool)

@@ -52,8 +52,8 @@ def _split(gen: torch.Generator) -> Tuple[torch.Generator, torch.Generator]:
     """
     # Draw two seeds from the parent generator
     dev = utils._generator_device(gen)
-    s1 = int(torch.randint(0, 2**63 - 1, (1,), generator=gen, dtype=torch.int64).item())
-    s2 = int(torch.randint(0, 2**63 - 1, (1,), generator=gen, dtype=torch.int64).item())
+    s1 = int(torch.randint(0, 2**63 - 1, (1,), generator=gen, device=gen.device, dtype=torch.int64).item())
+    s2 = int(torch.randint(0, 2**63 - 1, (1,), generator=gen, device=gen.device, dtype=torch.int64).item())
     g1 = torch.Generator(device=dev); g1.manual_seed(s1)
     g2 = torch.Generator(device=dev); g2.manual_seed(s2)
     return g1, g2

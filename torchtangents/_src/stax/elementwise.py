@@ -929,8 +929,8 @@ def ElementwiseNumerical(
         def nngp_ntk_fn(nngp, q11, q22, ntk=None):
             # Build quadrature grid
             grid = torch.outer(ws, ws)  # (deg, deg)
-            x = xs.view(xs.shape[0], *([1] * (nngp.ndim + 1)))
-            y = xs.view(1, xs.shape[0], *([1] * nngp.ndim))
+            x = xs.view(xs.shape[0], *([1] * (nngp.ndim + 1))).to(nngp.device)
+            y = xs.view(1, xs.shape[0], *([1] * nngp.ndim)).to(nngp.device)
             xy_axes = (0, 1)
 
             nngp_e = nngp.unsqueeze(0).unsqueeze(0)

@@ -273,7 +273,7 @@ def _check_agreement_with_empirical(
         kernel_fn_empirical = nt.monte_carlo_kernel_fn(
             init_fn=init_fn,
             apply_fn=apply_fn,
-            gen=gen,
+            key=gen,
             n_samples=n_samples,
             device_count=device_count,
             trace_axes=(channel_axis,),
@@ -657,7 +657,7 @@ class ParallelInOutTest(test_utils.NeuralTangentsTestCase):
         kernel_fn_empirical = nt.monte_carlo_kernel_fn(
             init_fn=init_fn,
             apply_fn=stax.unmask_fn(apply_fn),
-            gen=mc_key,
+            key=mc_key,
             n_samples=N_SAMPLES,
             implementation=_DEFAULT_TESTING_NTK_IMPLEMENTATION,
             vmap_axes=None
