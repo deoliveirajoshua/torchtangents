@@ -12,83 +12,129 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""An example comparing training a neural network with the NTK dynamics.
+"""An example comparing training a neural network with the NTK dynamics (PyTorch).
 
 In this example, we train a neural network on a small subset of MNIST using an
 MSE loss and SGD. We compare this training with the analytic function space
-prediction using the NTK. Data is loaded using tensorflow datasets.
+prediction using the NTK. Data is loaded using examples.datasets (PyTorch port).
 """
 
-from absl import app
-from jax import grad
-from jax import jit
-from jax import random
-from jax.example_libraries import optimizers
-import jax.numpy as jnp
-import neural_tangents as nt
-from neural_tangents import stax
+import numpy as np
+import torch
+import torchtangents as tt
+from torchtangents import stax
 from examples import datasets
 from examples import util
 
 
-_LEARNING_RATE = 1.0  # Learning rate to use during training.
-_TRAIN_SIZE = 128  # Dataset size to use for training.
-_TEST_SIZE = 128  # Dataset size to use for testing.
-_TRAIN_TIME = 1000.0  # Continuous time denoting duration of training.
+_LEARNING_RATE = 1.0   # Learning rate to use during training.
+_TRAIN_SIZE   = 128    # Dataset size to use for training.
+_TEST_SIZE    = 128    # Dataset size to use for testing.
+_TRAIN_TIME   = 1000.0 # Continuous time denoting duration of training.
+
+
+def _tree_map(fn, tree):
+  if isinstance(tree, (tuple, list)):
+    return type(tree)(_tree_map(fn, t) for t in tree)
+  if isinstance(tree, dict):
+    return {k: _tree_map(fn, v) for k, v in tree.items()}
+  return fn(tree)
+
+
+def _tree_zip_map(fn, t1, t2):
+  if isinstance(t1, (tuple, list)):
+    return type(t1)(_tree_zip_map(fn, a, b) for a, b in zip(t1, t2))
+  if isinstance(t1, dict):
+    return {k: _tree_zip_map(fn, t1[k], t2[k]) for k in t1}
+  return fn(t1, t2)
 
 
 def main(unused_argv):
+  # --------------------------------------------------------------------------
   # Build data pipelines.
+  # --------------------------------------------------------------------------
   print('Loading data.')
-  x_train, y_train, x_test, y_test = datasets.get_dataset('mnist',
-                                                          _TRAIN_SIZE,
-                                                          _TEST_SIZE)
+  x_train_np, y_train_np, x_test_np, y_test_np = datasets.get_dataset(
+      'mnist', _TRAIN_SIZE, _TEST_SIZE)
 
-  # Build the network
+  # Convert to torch tensors (float32).
+  x_train = torch.tensor(x_train_np, dtype=torch.float32)
+  y_train = torch.tensor(y_train_np, dtype=torch.float32)
+  x_test  = torch.tensor(x_test_np,  dtype=torch.float32)
+  y_test  = torch.tensor(y_test_np,  dtype=torch.float32)
+
+  # --------------------------------------------------------------------------
+  # Build the network (Erf MLP) using torchtangents.stax.
+  # --------------------------------------------------------------------------
   init_fn, apply_fn, _ = stax.serial(
-      stax.Dense(512, 1., 0.05),
+      stax.Dense(512, 1.0, 0.05),
       stax.Erf(),
-      stax.Dense(10, 1., 0.05))
+      stax.Dense(10, 1.0, 0.05)
+  )
 
-  key = random.PRNGKey(0)
-  _, params = init_fn(key, (-1, 784))
+  g = torch.Generator().manual_seed(0)
+  _, params = init_fn(g, (-1, 784))  # match JAX example’s input shape signature
 
-  # Create and initialize an optimizer.
-  opt_init, opt_apply, get_params = optimizers.sgd(_LEARNING_RATE)
-  state = opt_init(params)
+  # --------------------------------------------------------------------------
+  # Create an MSE loss (matches original) and manual SGD on the param pytree.
+  # --------------------------------------------------------------------------
+  def loss_fn(params, x, y):
+    fx = apply_fn(params, x)               # (N, C)
+    return 0.5 * torch.mean((fx - y) ** 2)
 
-  # Create an mse loss function and a gradient function.
-  loss = lambda fx, y_hat: 0.5 * jnp.mean((fx - y_hat) ** 2)
-  grad_loss = jit(grad(lambda params, x, y: loss(apply_fn(params, x), y)))
+  def sgd_step(params, lr, x, y):
+    # Enable gradients.
+    params = _tree_map(lambda p: p.detach().requires_grad_(True), params)
+    loss = loss_fn(params, x, y)
+    loss.backward()
 
+    with torch.no_grad():
+      new_params = _tree_map(lambda p: p - lr * p.grad, params)
+    # Clear .grad references to avoid holding graph.
+    _ = _tree_map(lambda p: p.detach().requires_grad_(False), params)
+    return new_params
+
+  # --------------------------------------------------------------------------
   # Create an MSE predictor to solve the NTK equation in function space.
-  ntk = nt.batch(nt.empirical_ntk_fn(apply_fn, vmap_axes=0),
+  # --------------------------------------------------------------------------
+  ntk = tt.batch(tt.empirical_ntk_fn(apply_fn, vmap_axes=0),
                  batch_size=64, device_count=0)
-  g_dd = ntk(x_train, None, params)
-  g_td = ntk(x_test, x_train, params)
-  predictor = nt.predict.gradient_descent_mse(g_dd, y_train)
+  g_dd = ntk(x_train, None, params)      # train-train kernel
+  g_td = ntk(x_test,  x_train, params)   # test-train kernel
+  predictor = tt.predict.gradient_descent_mse(g_dd, y_train)
 
-  # Get initial values of the network in function space.
-  fx_train = apply_fn(params, x_train)
-  fx_test = apply_fn(params, x_test)
+  # Get initial network outputs (function space values).
+  fx_train0 = apply_fn(params, x_train)
+  fx_test0  = apply_fn(params, x_test)
 
-  # Train the network.
+  # --------------------------------------------------------------------------
+  # Train the network with discrete-time SGD to match continuous time T = steps*lr.
+  # --------------------------------------------------------------------------
   train_steps = int(_TRAIN_TIME // _LEARNING_RATE)
-  print('Training for {} steps'.format(train_steps))
+  print(f'Training for {train_steps} steps')
 
   for i in range(train_steps):
-    params = get_params(state)
-    state = opt_apply(i, grad_loss(params, x_train, y_train), state)
+    params = sgd_step(params, _LEARNING_RATE, x_train, y_train)
 
-  # Get predictions from analytic computation.
+  # --------------------------------------------------------------------------
+  # Analytic prediction from NTK flow at continuous time _TRAIN_TIME.
+  # --------------------------------------------------------------------------
   print('Computing analytic prediction.')
-  fx_train, fx_test = predictor(_TRAIN_TIME, fx_train, fx_test, g_td)
+  fx_train_pred, fx_test_pred = predictor(_TRAIN_TIME, fx_train0, fx_test0, g_td)
 
-  # Print out summary data comparing the linear / nonlinear model.
-  util.print_summary('train', y_train, apply_fn(params, x_train), fx_train,
-                     loss)
-  util.print_summary('test', y_test, apply_fn(params, x_test), fx_test,
-                     loss)
+  # --------------------------------------------------------------------------
+  # Summaries comparing nonlinear training to linearized (NTK) dynamics.
+  # --------------------------------------------------------------------------
+  util.print_summary('train', y_train,
+                     apply_fn(params, x_train),
+                     fx_train_pred,
+                     lambda fx, y: 0.5 * torch.mean((fx - y) ** 2))
+
+  util.print_summary('test', y_test,
+                     apply_fn(params, x_test),
+                     fx_test_pred,
+                     lambda fx, y: 0.5 * torch.mean((fx - y) ** 2))
+
 
 if __name__ == '__main__':
-  app.run(main)
+  main()
