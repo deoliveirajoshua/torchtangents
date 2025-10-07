@@ -48,12 +48,20 @@ def _tree_zip(*trees):
         return t(_tree_zip(*(xs[i] for xs in trees)) for i in range(len(ref)))
     return trees
 
+
+def _generator_device(gen: torch.Generator) -> torch.device:
+    # PyTorch exposes generator.device on CUDA (>=1.10-ish); default to CPU
+    dev = getattr(gen, "device", None)
+    return torch.device(dev) if dev is not None else torch.device("cpu")
+
+
 def _split_generator(gen: torch.Generator) -> Tuple[torch.Generator, torch.Generator]:
     """Deterministically split a torch.Generator into (gen, new_child)."""
     # Draw a new seed from `gen` and create a child generator.
     # This keeps things purely PyTorch and compile-friendly.
+    dev = _generator_device(gen)
     seed = int(torch.randint(0, 2**63 - 1, (1,), generator=gen).item())
-    child = torch.Generator(device='cpu')
+    child = torch.Generator(device=dev)
     child.manual_seed(seed)
     # return original for further use (already advanced), and the child
     return gen, child
