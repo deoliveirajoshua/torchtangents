@@ -17,7 +17,7 @@ class InfiniteFcnTest(test_utils.NeuralTangentsTestCase):
 
     def test_infinite_fcn(self):
         # Preserve original call style; use infinite_fcn.main() if no args.
-        infinite_fcn.main(None)
+        infinite_fcn.main()
 
 
 if __name__ == "__main__":

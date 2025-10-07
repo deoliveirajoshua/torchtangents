@@ -425,7 +425,9 @@ def gradient_descent_mse_ensemble(
     last_t_axes = range(-n_trace_axes, 0)
     trace_shape = tuple(y_train.shape[a] for a in trace_axes)
 
-    y_train_flat = torch.movedim(y_train, trace_axes, last_t_axes).reshape((-1,) + trace_shape)
+    y_train_flat = torch.movedim(
+        y_train, tuple(map(int, trace_axes)), tuple(last_t_axes)
+    ).reshape((-1,) + trace_shape)
 
     k_dd_cache: Dict[str, Tensor] = {}
 

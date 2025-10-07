@@ -135,7 +135,7 @@ def _get_dummy_data(
 
   def get_x(shape):
     x = torch.randn(shape, generator=g)
-    mask = torch.bernoulli(torch.full(shape, 0.6, generator=g))
+    mask = torch.bernoulli(torch.full(shape, 0.6), generator=g)
     # mask==1 => padding location; set to mask_constant
     x = torch.where(mask.bool(), torch.tensor(mask_constant, dtype=x.dtype), x)
     return x

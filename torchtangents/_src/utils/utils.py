@@ -698,6 +698,15 @@ def tree_map(fn, *trees):
     return _pytree.tree_map(fn, *trees)
 
 
+def tree_all(x):
+    if isinstance(x, dict):
+        return all(tree_all(v) for v in x.values())
+    elif isinstance(x, (list, tuple)):
+        return all(tree_all(v) for v in x)
+    else:
+        return bool(x)
+
+
 def _generator_device(gen: torch.Generator) -> torch.device:
     """
     Return the device associated with a torch.Generator.
