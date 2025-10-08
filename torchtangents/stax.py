@@ -1,6 +1,6 @@
-# Copyright 2025 torchtangents contributors
+# Copyright 2019 Google LLC
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
+# Licensed under the Apache License, Version 2.0 (the "License');
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
@@ -12,7 +12,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""PyTorch implementation of neural-tangents stax layers.
+"""Closed-form NNGP and NTK library.
+
+This library contains layers mimicking those in
+:obj:`jax.example_libraries.stax` with similar API apart from:
+
+1) Instead of `(init_fn, apply_fn)` tuple, layers return a triple
+`(init_fn, apply_fn, kernel_fn)`, where the added `kernel_fn` maps a
+:class:`~neural_tangents.Kernel` to a new :class:`~neural_tangents.Kernel`, and
+represents the change in the analytic NTK and NNGP kernels
+(:attr:`~neural_tangents.Kernel.nngp`, :attr:`~neural_tangents.Kernel.ntk`).
+These functions are chained / stacked together within the :obj:`serial` or
+:obj:`parallel` combinators, similarly to `init_fn` and `apply_fn`.
+For details, please see "`Neural Tangents: Fast and Easy Infinite Neural
+Networks in Python <https://arxiv.org/abs/1912.02803>`_".
+
+2) In layers with random weights, NTK parameterization is used by default
+(see page 3 in
+"`Neural Tangent Kernel: Convergence and Generalization in Neural Networks
+<https://arxiv.org/abs/1806.07572>`_"). Standard parameterization can be
+specified for :obj:`Conv` and :obj:`Dense` layers by a keyword argument
+`parameterization`. For details, please see "`On the infinite width limit of
+neural networks with a standard parameterization
+<https://arxiv.org/abs/2001.07301>`_"
+
+PyTorch implementation of neural-tangents stax layers.
 
 This module provides a PyTorch implementation of the neural-tangents stax API,
 allowing for computation of empirical and infinite-width Neural Tangent Kernels

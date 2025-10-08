@@ -1,4 +1,4 @@
-# Copyright 2025 torchtangents contributors
+# Copyright 2019 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Public predict API for torchtangents."""
+"""Public torchtangents.predict, matching `neural_tangents.predict` API. See `_src/predict.py` for details."""
 
 from ._src.predict import (
     gradient_descent,
