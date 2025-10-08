@@ -12,10 +12,26 @@ This directory contains examples and documentation for the proposed PyTorch-nati
 - **`roadmap_implementation.py`** - Phased implementation plan showing gradual evolution from stax to native PyTorch
 - **`api_benchmark.py`** - Performance and usability comparison between current and proposed APIs
 
+### NTK Gradient Computation Examples
+- **`simple_ntk_gradients.py`** - ⭐ **START HERE** - Simple examples of computing NTK gradients w.r.t. inputs
+- **`advanced_ntk_gradients.py`** - Advanced applications: adversarial analysis, higher-order gradients, method comparisons
+- **`ntk_gradients.py`** - Comprehensive tutorial with detailed explanations and educational examples
+- **`README_ntk_gradients.md`** - Complete documentation for NTK gradient computation methods
+
+### Core Examples
+- **`infinite_fcn.py`** - Basic infinite-width fully connected network example
+
 ## 🚀 Quick Start
 
-Run the API demo to see the proposed PyTorch-native interface:
+### Try NTK Gradient Computation (New!)
+```bash
+cd examples/
+python simple_ntk_gradients.py
+```
 
+This demonstrates how to compute gradients of Neural Tangent Kernels with respect to inputs - useful for input optimization, sensitivity analysis, and adversarial studies.
+
+### Run the PyTorch-Native API Demo
 ```bash
 cd examples/
 python pytorch_native_api_demo.py
