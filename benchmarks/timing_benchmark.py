@@ -456,7 +456,7 @@ class TorchTangentsTimingBenchmark:
         input_shape = (-1,) + x.shape[1:]
         _, params = init_fn(rng, input_shape)
         kernel = kernel_fn(x, None, 'ntk')
-        return kernel.ntk
+        return kernel
     
     def _compute_nngp_stax(self, model, x):
         """Compute NNGP using stax interface."""
@@ -466,7 +466,7 @@ class TorchTangentsTimingBenchmark:
         input_shape = (-1,) + x.shape[1:]
         _, params = init_fn(rng, input_shape)
         kernel = kernel_fn(x, None, 'nngp')
-        return kernel.nngp
+        return kernel
     
     def _compute_batched_ntk(self, model, x, batch_size):
         """Compute NTK with batching."""
@@ -477,7 +477,7 @@ class TorchTangentsTimingBenchmark:
         _, params = init_fn(rng, input_shape)
         
         batched_kernel_fn = tt.batch(
-            lambda x1, x2: kernel_fn(x1, x2, 'ntk').ntk,
+            lambda x1, x2: kernel_fn(x1, x2, 'ntk'),
             batch_size=batch_size,
             device_count=1
         )
@@ -501,7 +501,7 @@ class TorchTangentsTimingBenchmark:
             tt.stax.Dense(1)
         )
         kernel = kernel_fn(x, None, 'ntk')
-        return kernel.ntk
+        return kernel
     
     def save_results(self, filepath: str):
         """Save timing results to JSON file."""

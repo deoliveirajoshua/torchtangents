@@ -49,11 +49,34 @@ INSTALL_REQUIRES = [
 TESTS_REQUIRES = [
     'pytest>=6.0',
     'pytest-cov',
+    'numpy>=1.20.0',  # Required for tests
+]
+
+EXAMPLES_REQUIRES = [
+    'matplotlib>=3.5.0',
+    'numpy>=1.20.0',
+]
+
+BENCHMARKS_REQUIRES = [
+    'numpy>=1.20.0',
+    'matplotlib>=3.5.0',
+    'seaborn>=0.11.0',
+    'pandas>=1.3.0',
+    'psutil>=5.8.0',
+]
+
+COMPARISON_REQUIRES = [
+    'jax>=0.3.0',
+    'neural-tangents>=0.6.0',
 ]
 
 EXTRAS_REQUIRE = {
     'testing': TESTS_REQUIRES,
-    'dev': TESTS_REQUIRES + [
+    'examples': EXAMPLES_REQUIRES,
+    'benchmarks': BENCHMARKS_REQUIRES,
+    'comparison': COMPARISON_REQUIRES,
+    'all': TESTS_REQUIRES + EXAMPLES_REQUIRES + BENCHMARKS_REQUIRES + COMPARISON_REQUIRES,
+    'dev': TESTS_REQUIRES + EXAMPLES_REQUIRES + [
         'black',
         'isort',
         'flake8',
@@ -70,7 +93,7 @@ setup(
     long_description=get_long_description(),
     long_description_content_type='text/markdown',
     url='https://github.com/yourusername/torchtangents',
-    packages=find_packages(exclude=('tests', 'examples')),
+    packages=find_packages(exclude=('tests', 'examples', 'benchmarks', 'docs', 'neural-tangents-main')),
     install_requires=INSTALL_REQUIRES,
     extras_require=EXTRAS_REQUIRE,
     python_requires='>=3.8',

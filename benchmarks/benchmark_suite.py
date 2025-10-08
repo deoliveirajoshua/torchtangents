@@ -399,7 +399,7 @@ class TorchTangentsBenchmark:
         
         # Compute kernel
         kernel = kernel_fn(x, None, 'ntk')
-        return kernel.ntk
+        return kernel
     
     def _compute_nngp_stax(self, model, x, **kwargs):
         """Compute NNGP using stax interface."""
@@ -411,7 +411,7 @@ class TorchTangentsBenchmark:
         _, params = init_fn(rng, input_shape)
         
         kernel = kernel_fn(x, None, 'nngp')
-        return kernel.nngp
+        return kernel
     
     def _compute_batched_ntk(self, model, x, batch_size, **kwargs):
         """Compute NTK with batching."""
@@ -425,7 +425,7 @@ class TorchTangentsBenchmark:
         
         # Create batched kernel function
         batched_kernel_fn = tt.batch(
-            lambda x1, x2: kernel_fn(x1, x2, 'ntk').ntk,
+            lambda x1, x2: kernel_fn(x1, x2, 'ntk'),
             batch_size=batch_size,
             device_count=1
         )
@@ -451,7 +451,7 @@ class TorchTangentsBenchmark:
         )
         
         kernel = kernel_fn(x, None, 'ntk')
-        return kernel.ntk
+        return kernel
     
     def _model_to_stax(self, model):
         """Convert PyTorch model to stax representation (simplified)."""

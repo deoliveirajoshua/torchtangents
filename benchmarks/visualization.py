@@ -2,13 +2,24 @@
 """
 Benchmark Visualization Tools
 
-Tools for visualizing and analyzing TorchTangents benchmark results.
+Command-line tool for visualizing and analyzing TorchTangents benchmark results.
 Creates plots, charts, and reports from benchmark data.
+
+Usage:
+    python visualization.py <results_file> [options]
+    python visualization.py --example [options]
+
+Examples:
+    python visualization.py benchmark_results.json
+    python visualization.py results.json --output-dir my_report
+    python visualization.py --example --plots performance,api_complexity
 """
 
 import json
 import time
 import numpy as np
+import argparse
+import sys
 from typing import Dict, List, Optional, Tuple
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -428,13 +439,211 @@ class BenchmarkVisualizer:
             f.write("- Comprehensive feature coverage\n")
 
 
+def print_usage_examples():
+    """Print usage examples for the visualization tool."""
+    
+    examples = """
+TorchTangents Benchmark Visualization Tool
+==========================================
+
+This tool generates visualizations and reports from TorchTangents benchmark results.
+
+USAGE:
+    python visualization.py <results_file> [options]
+    python visualization.py --example [options]
+
+EXAMPLES:
+
+    # Basic usage with benchmark results file
+    python visualization.py benchmark_results.json
+    
+    # Custom output directory
+    python visualization.py results.json --output-dir my_analysis
+    
+    # Generate specific plots only
+    python visualization.py results.json --plots performance,api_complexity
+    
+    # Use example data for demonstration
+    python visualization.py --example
+    
+    # Generate all available plots
+    python visualization.py results.json --plots all
+    
+    # Use different matplotlib style
+    python visualization.py results.json --style dark_background
+
+INPUT FILE FORMAT:
+    The results file should be a JSON file with benchmark data containing:
+    - 'performance': Performance benchmarking results
+    - 'api_complexity': API complexity analysis  
+    - 'feature_completeness': Feature comparison data
+    - Cross-library comparison data (optional)
+
+OUTPUT:
+    - Individual plot images (PNG format)
+    - Comprehensive markdown report (benchmark_summary.md)
+    - All files saved to specified output directory
+
+PLOT TYPES:
+    - performance: Scaling analysis and timing plots
+    - cross_library: TorchTangents vs Neural-tangents comparison
+    - features: Feature completeness matrix and scores
+    - api_complexity: API complexity and reduction analysis
+    - all: Generate all available plots
+
+For more help: python visualization.py --help
+"""
+    
+    print(examples)
+
+
 def main():
-    """Example usage of benchmark visualizer."""
+    """Main function to handle command line arguments and generate visualizations."""
     
-    visualizer = BenchmarkVisualizer()
+    parser = argparse.ArgumentParser(
+        description='Generate visualizations from TorchTangents benchmark results',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Generate report from benchmark results file
+  python visualization.py results.json
+  
+  # Generate report with custom output directory
+  python visualization.py results.json --output-dir my_report
+  
+  # Generate only specific plots
+  python visualization.py results.json --plots performance,api_complexity
+  
+  # Use example data for demonstration
+  python visualization.py --example
+"""
+    )
     
-    # Load example results (you would load actual benchmark results)
-    example_results = {
+    parser.add_argument(
+        'results_file',
+        nargs='?',
+        help='Path to JSON file containing benchmark results'
+    )
+    
+    parser.add_argument(
+        '--output-dir', '-o',
+        default='benchmark_report',
+        help='Output directory for generated report (default: benchmark_report)'
+    )
+    
+    parser.add_argument(
+        '--plots',
+        help='Comma-separated list of plots to generate (performance,cross_library,features,api_complexity,all)'
+    )
+    
+    parser.add_argument(
+        '--example',
+        action='store_true',
+        help='Use example data instead of loading from file (for demonstration)'
+    )
+    
+    parser.add_argument(
+        '--style',
+        default='seaborn-v0_8',
+        help='Matplotlib style to use for plots (default: seaborn-v0_8)'
+    )
+    
+    args = parser.parse_args()
+    
+    # Validate arguments
+    if not args.example and not args.results_file:
+        parser.error("Must provide either a results file or use --example")
+    
+    if args.example and args.results_file:
+        parser.error("Cannot use both --example and provide a results file")
+    
+    # Initialize visualizer
+    visualizer = BenchmarkVisualizer(style=args.style)
+    
+    # Load results
+    if args.example:
+        print("Using example benchmark data for demonstration...")
+        results = _get_example_results()
+    else:
+        print(f"Loading benchmark results from {args.results_file}...")
+        try:
+            results = visualizer.load_benchmark_results(args.results_file)
+        except FileNotFoundError:
+            print(f"Error: Could not find results file: {args.results_file}", file=sys.stderr)
+            sys.exit(1)
+        except json.JSONDecodeError as e:
+            print(f"Error: Invalid JSON in results file: {e}", file=sys.stderr)
+            sys.exit(1)
+        except Exception as e:
+            print(f"Error loading results: {e}", file=sys.stderr)
+            sys.exit(1)
+    
+    # Determine which plots to generate
+    if args.plots:
+        if args.plots.lower() == 'all':
+            plot_types = ['performance', 'cross_library', 'features', 'api_complexity']
+        else:
+            plot_types = [p.strip() for p in args.plots.split(',')]
+            valid_plots = ['performance', 'cross_library', 'features', 'api_complexity']
+            invalid_plots = [p for p in plot_types if p not in valid_plots]
+            if invalid_plots:
+                print(f"Error: Invalid plot types: {invalid_plots}", file=sys.stderr)
+                print(f"Valid plot types: {valid_plots}", file=sys.stderr)
+                sys.exit(1)
+    else:
+        # Generate all available plots based on data
+        plot_types = []
+        if 'performance' in results:
+            plot_types.append('performance')
+        if 'performance' in results and 'comparisons' in results['performance']:
+            plot_types.append('cross_library')
+        if 'feature_completeness' in results:
+            plot_types.append('features')
+        if 'api_complexity' in results:
+            plot_types.append('api_complexity')
+    
+    # Create output directory
+    output_path = Path(args.output_dir)
+    output_path.mkdir(exist_ok=True)
+    print(f"Generating reports in: {output_path.absolute()}")
+    
+    # Generate individual plots
+    plot_count = 0
+    
+    if 'performance' in plot_types and 'performance' in results:
+        print("Generating performance scaling plot...")
+        visualizer.plot_performance_scaling(results, str(output_path / "performance_scaling.png"))
+        plot_count += 1
+    
+    if 'cross_library' in plot_types and 'performance' in results and 'comparisons' in results['performance']:
+        print("Generating cross-library comparison plot...")
+        visualizer.plot_cross_library_comparison(results, str(output_path / "cross_library_comparison.png"))
+        plot_count += 1
+    
+    if 'features' in plot_types and 'feature_completeness' in results:
+        print("Generating feature completeness plot...")
+        visualizer.plot_feature_completeness(results, str(output_path / "feature_completeness.png"))
+        plot_count += 1
+    
+    if 'api_complexity' in plot_types and 'api_complexity' in results:
+        print("Generating API complexity plot...")
+        visualizer.plot_api_complexity(results, str(output_path / "api_complexity.png"))
+        plot_count += 1
+    
+    # Generate comprehensive report if multiple plots
+    if plot_count > 1 or not args.plots:
+        print("Generating comprehensive markdown report...")
+        visualizer._generate_summary_report(results, str(output_path / "benchmark_summary.md"))
+    
+    print(f"\n✅ Generated {plot_count} plots successfully!")
+    print(f"📁 Report available in: {output_path.absolute()}")
+    if plot_count > 1 or not args.plots:
+        print(f"📄 Open {output_path / 'benchmark_summary.md'} to view the complete report")
+
+
+def _get_example_results() -> Dict:
+    """Get example benchmark results for demonstration."""
+    return {
         'performance': {
             'results': [
                 {
@@ -446,6 +655,11 @@ def main():
                     'config': {'batch_size': 16, 'width': 128, 'depth': 3},
                     'timings': {'ntk': {'mean': 0.2}, 'nngp': {'mean': 0.15}},
                     'memory': {'peak_mb': 500}
+                },
+                {
+                    'config': {'batch_size': 32, 'width': 256, 'depth': 4},
+                    'timings': {'ntk': {'mean': 0.4}, 'nngp': {'mean': 0.3}},
+                    'memory': {'peak_mb': 1000}
                 }
             ],
             'comparisons': [
@@ -455,6 +669,13 @@ def main():
                     'neural_tangents_time': 0.15,
                     'speedup_ratio': 1.5,
                     'memory_ratio': 0.8
+                },
+                {
+                    'config': {'batch_size': 16, 'hidden_dim': 128},
+                    'torchtangents_time': 0.2,
+                    'neural_tangents_time': 0.3,
+                    'speedup_ratio': 1.5,
+                    'memory_ratio': 0.9
                 }
             ]
         },
@@ -471,13 +692,17 @@ def main():
             'features': [
                 ('Basic NTK', True, True),
                 ('NNGP', True, True),
-                ('Convolutions', False, True)
+                ('Batching support', True, True),
+                ('GPU acceleration', True, True),
+                ('Empirical kernels', True, True),
+                ('Monte Carlo kernels', True, True),
+                ('PyTorch integration', True, False),
+                ('JAX integration', False, True),
+                ('Convolutions', False, True),
+                ('Attention layers', False, True)
             ]
         }
     }
-    
-    # Generate comprehensive report
-    visualizer.generate_benchmark_report(example_results, "example_benchmark_report")
 
 
 if __name__ == "__main__":

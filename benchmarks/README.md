@@ -1,6 +1,25 @@
 # TorchTangents Benchmarks
 
-This directory contains comprehensive benchmarking tools for analyzing TorchTangents performance, memory usage, and feature comparisons.
+This directory contains comprehensive benchmarking tools for analyzing TorchTangents performanc### 2. Run Basic Benchmark
+
+```bash
+# Run comprehensive benchmark
+python benchmarks/benchmark_suite.py
+
+# Run timing analysis
+python benchmarks/timing_benchmark.py
+
+# Run memory profiling
+python benchmarks/memory_profiler.py
+
+# Compare with neural-tangents (if installed)
+python benchmarks/cross_library_benchmark.py
+
+# Generate visualization report from results
+python benchmarks/visualization.py results.json
+# or use wrapper for dependency checking
+python run_visualization.py --example
+```nd feature comparisons.
 
 ## Overview
 
@@ -84,18 +103,28 @@ results = benchmark.run_comprehensive_comparison()
 ### 5. Visualization Tools
 **File**: `visualization.py`
 
-Generate plots and reports:
+Command-line tool for generating plots and reports:
 - Performance scaling charts
-- Memory usage visualization
+- Memory usage visualization  
 - Cross-library comparison plots
 - Feature completeness matrices
 - Comprehensive HTML/Markdown reports
 
-```python
-from benchmarks.visualization import BenchmarkVisualizer
+```bash
+# Generate report from benchmark results
+python benchmarks/visualization.py results.json
 
-visualizer = BenchmarkVisualizer()
-visualizer.generate_benchmark_report(results, 'report_output/')
+# Custom output directory
+python benchmarks/visualization.py results.json --output-dir my_report
+
+# Generate specific plots only
+python benchmarks/visualization.py results.json --plots performance,api_complexity
+
+# Use example data for demonstration
+python benchmarks/visualization.py --example
+
+# Alternative: Use wrapper script (handles missing dependencies)
+python run_visualization.py --example
 ```
 
 ## Quick Start
