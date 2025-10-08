@@ -12,32 +12,73 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Batching utilities for torchtangents."""
+'''
+Batch kernel computations serially or in parallel.
+
+This module contains a decorator `batch` that can be applied to any `kernel_fn`
+of signature `kernel_fn(x1, x2, *args, **kwargs)`. The decorated function
+performs the same computation by batching over `x1` and `x2` and concatenating
+the result, allowing to both use multiple accelerators and stay within memory
+limits.
+'''
+
+# This file is adapted from the neural-tangents library:
+
 
 import functools
 import math
-from typing import Callable, Optional, Union
+from typing import Any, Callable, Iterable, Optional, TypeVar, Union
 import torch
 
 from .utils.kernel import Kernel
 from .utils.typing import Axes
+from .utils.typing import KernelFn
 
+# A type variable to indicate that `nt.batch` and other functions here do not
+# change the function signature.
+_KernelFn = TypeVar('_KernelFn', bound=KernelFn)
 
-def batch(kernel_fn: Callable,
+def batch(
+        kernel_fn: Callable,
          batch_size: int = 0,
          device_count: int = -1,
-         store_on_device: bool = True) -> Callable:
-    """Batch kernel computation for memory efficiency.
-    
-    Args:
-        kernel_fn: kernel function to batch.
-        batch_size: batch size for computation. 0 means no batching.
-        device_count: number of devices to use (-1 for auto).
-        store_on_device: whether to store results on device.
-        
-    Returns:
-        Batched kernel function.
-    """
+         store_on_device: bool = True
+) -> Callable:
+    """Returns a function that computes a kernel in batches over all devices.
+
+  Note that you typically should not apply the `jax.jit` decorator to the
+  resulting `batched_kernel_fn`, as its purpose is explicitly serial execution
+  in order to save memory. Further, you do not need to apply `jax.jit` to the
+  input `kernel_fn` function, as it is JITted internally.
+
+  Args:
+    kernel_fn:
+      A function that computes a kernel on two batches,
+      `kernel_fn(x1, x2, *args, **kwargs)`. Here `x1` and `x2` are
+      `jnp.ndarray`s of shapes `(n1,) + input_shape` and `(n2,) + input_shape`.
+      The kernel function should return a `PyTree`.
+
+    batch_size:
+      specifies the size of each batch that gets processed per physical device.
+      Because we parallelize the computation over columns it should be the case
+      that `x1.shape[0]` is divisible by `device_count * batch_size` and
+      `x2.shape[0]` is divisible by `batch_size`.
+
+    device_count:
+      specifies the number of physical devices to be used. If
+      `device_count == -1` all devices are used. If `device_count == 0`, no
+      device parallelism is used (a single default device is used).
+
+    store_on_device:
+      specifies whether the output should be kept on device or brought back to
+      CPU RAM as it is computed. Defaults to `True`. Set to `False` to store
+      and concatenate results using CPU RAM, allowing to compute larger kernels.
+
+  Returns:
+    A new function with the same signature as `kernel_fn` that computes the
+    kernel by batching over the dataset in parallel with the specified
+    `batch_size` using `device_count` devices.
+  """
     if batch_size <= 0:
         return kernel_fn
     
