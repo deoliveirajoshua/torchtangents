@@ -11,7 +11,7 @@ tests/
 │   ├── __init__.py
 │   ├── test_basic.py           # Basic functionality tests
 │   ├── test_batching.py        # Batching tests
-│   ├── test_empirical.py       # Empirical kernel tests  
+│   ├── test_empirical.py       # Empirical kernel tests
 │   ├── test_monte_carlo.py     # Monte Carlo tests
 │   ├── test_predict.py         # Prediction tests
 │   ├── test_stax_combinators.py # Stax combinator tests
