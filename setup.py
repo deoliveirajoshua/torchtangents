@@ -1,20 +1,100 @@
+#!/usr/bin/env python3
+# Copyright 2025 torchtangents contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Setup script for torchtangents."""
+
+import os
 from setuptools import setup, find_packages
 
-setup(
-    name="torchtangents",
-    version="0.0.0",
-    description="PyTorch port of Neural Tangents",
-    long_description=open("README.md", encoding="utf-8").read(),
-    long_description_content_type="text/markdown",
-    python_requires=">=3.9",
-    install_requires=[
-        "torch>=2.1",
-        "numpy",
-        "frozendict",
-        "parameterized"
+
+def get_version():
+    """Get version from package __init__.py."""
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.join(current_dir, 'torchtangents', '__init__.py')) as fp:
+        for line in fp:
+            if line.startswith('__version__') and '=' in line:
+                version = line[line.find('=') + 1:].strip(' \'"\n')
+                if version:
+                    return version
+    raise ValueError('`__version__` not found in `torchtangents/__init__.py`')
+
+
+def get_long_description():
+    """Get long description from README."""
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    try:
+        with open(os.path.join(current_dir, 'README.md'), encoding='utf-8') as f:
+            return f.read()
+    except FileNotFoundError:
+        return "PyTorch implementation of Neural Tangents for computing empirical and infinite-width NTKs."
+
+
+INSTALL_REQUIRES = [
+    'torch>=2.0.0',
+    'numpy>=1.20.0',
+]
+
+TESTS_REQUIRES = [
+    'pytest>=6.0',
+    'pytest-cov',
+]
+
+EXTRAS_REQUIRE = {
+    'testing': TESTS_REQUIRES,
+    'dev': TESTS_REQUIRES + [
+        'black',
+        'isort',
+        'flake8',
     ],
-    packages=find_packages(
-        where=".",
-        include=["torchtangents*"],
-    ),
+}
+
+setup(
+    name='torchtangents',
+    version=get_version(),
+    license='Apache 2.0',
+    author='TorchTangents Contributors',
+    author_email='torchtangents@example.com',
+    description='PyTorch implementation of Neural Tangents for computing empirical and infinite-width NTKs',
+    long_description=get_long_description(),
+    long_description_content_type='text/markdown',
+    url='https://github.com/yourusername/torchtangents',
+    packages=find_packages(exclude=('tests', 'examples')),
+    install_requires=INSTALL_REQUIRES,
+    extras_require=EXTRAS_REQUIRE,
+    python_requires='>=3.8',
+    classifiers=[
+        'Development Status :: 3 - Alpha',
+        'Intended Audience :: Developers',
+        'Intended Audience :: Science/Research',
+        'License :: OSI Approved :: Apache Software License',
+        'Operating System :: OS Independent',
+        'Programming Language :: Python :: 3',
+        'Programming Language :: Python :: 3.8',
+        'Programming Language :: Python :: 3.9',
+        'Programming Language :: Python :: 3.10',
+        'Programming Language :: Python :: 3.11',
+        'Topic :: Scientific/Engineering',
+        'Topic :: Scientific/Engineering :: Artificial Intelligence',
+        'Topic :: Scientific/Engineering :: Mathematics',
+        'Topic :: Software Development :: Libraries',
+        'Topic :: Software Development :: Libraries :: Python Modules',
+    ],
+    keywords='neural networks, neural tangent kernel, pytorch, machine learning, deep learning, infinite width',
+    project_urls={
+        'Bug Reports': 'https://github.com/yourusername/torchtangents/issues',
+        'Source': 'https://github.com/yourusername/torchtangents',
+        'Documentation': 'https://github.com/yourusername/torchtangents#readme',
+    },
 )

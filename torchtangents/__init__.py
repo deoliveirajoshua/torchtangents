@@ -1,4 +1,4 @@
-# Copyright 2019 Google LLC
+# Copyright 2025 torchtangents contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,12 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# ==============================================================================
 
-"""Public Neural Tangents modules and functions."""
+"""PyTorch implementation of Neural Tangents for computing empirical and infinite-width NTKs."""
 
-
-__version__ = '0.0.0'
+__version__ = '0.1.0'
 
 from . import predict
 from . import stax

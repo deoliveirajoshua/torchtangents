@@ -1,4 +1,4 @@
-# Copyright 2025
+# Copyright 2025 torchtangents contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,733 +12,166 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""General-purpose internal utilities (PyTorch version).
+"""Utility functions for torchtangents."""
 
-If a function or class is used in multiple modules, put it here.
-"""
-
-from collections import namedtuple
 import functools
-import inspect
-import operator
-import types
-from typing import Any, Callable, Iterable, Optional, Sequence, Sized, TypeVar, Union
-import warnings
-
-import numpy as np
+from typing import Any, Callable, Optional, Sequence, Tuple, Union
 import torch
-from torch.utils import _pytree as _pytree
-
-PyTree = Any
-Axes = Union[int, Sequence[int]]
-
-# -------------------------
-# Tree helpers (NTTree only)
-# -------------------------
-
-def is_list_or_tuple(x) -> bool:
-    # We do not want to return True if x is a subclass of list or tuple since
-    # otherwise this will return true for namedtuples.
-    return type(x) == list or type(x) == tuple
 
 
-def is_nt_tree_of(x, dtype: Union[type, tuple[type, ...]]) -> bool:
-    if isinstance(x, dtype):
-        return True
-    if not is_list_or_tuple(x):
-        return False
-    return all(is_nt_tree_of(_x, dtype) for _x in x)
-
-
-def nt_tree_fn(
-    nargs: Optional[int] = None,
-    tree_structure_argnum: Optional[int] = None,
-    reduce: Callable = lambda x: x
-):
-    """Convert a function that acts on single inputs to one that acts on trees.
-
-    Mirrors the original JAX-based behavior but specialized to NTTree
-    (lists/tuples as internal nodes).
+def canonicalize_get(get: Optional[Union[str, Tuple[str, ...]]], 
+                    x2_is_none: bool) -> Tuple[bool, bool]:
+    """Canonicalizes the `get` argument for kernel computation.
+    
+    Args:
+        get: either `None`, a string, or a tuple of strings specifying which
+            covariance matrices to compute. Can be 'nngp', 'ntk', or both.
+        x2_is_none: boolean specifying whether `x2` is `None`.
+        
+    Returns:
+        A tuple `(get_nngp, get_ntk)` of booleans specifying whether to compute
+        NNGP and NTK respectively.
     """
-
-    def check_tree_structure(args):
-        """Ensure the structure of the trees in each of the `nargs` is the same."""
-        if any(is_list_or_tuple(x) for x in args):
-            if not all(type(x) == type(args[0]) for x in args[1:]):
-                raise TypeError(f'Inconsistent NTTree structure found. '
-                                f'Node Types: {[type(x) for x in args]}.')
-            for x in zip(*args):
-                check_tree_structure(x)
-
-    def tree_fn(fn):
-        @wraps(fn)
-        def wrapped_fn(*args, **kwargs):
-            _nargs = len(args) if nargs is None else nargs
-            recurse, norecurse = args[:_nargs], args[_nargs:]
-
-            structure_argnum = tree_structure_argnum
-            if structure_argnum is None:
-                check_tree_structure(recurse)
-                structure_argnum = 0
-
-            if is_list_or_tuple(args[structure_argnum]):
-                list_or_tuple = type(args[structure_argnum])
-                return reduce(list_or_tuple(
-                    wrapped_fn(*(xs + norecurse), **kwargs) for xs in zip(*recurse)))
-            return fn(*args, **kwargs)
-        return wrapped_fn
-    return tree_fn
-
-
-def _tree_all_bool(x) -> bool:
-    """all() over a (potential) NTTree of booleans."""
-    if is_list_or_tuple(x):
-        return all(_tree_all_bool(e) for e in x)
-    # accept Python bools, numpy.bool_, torch.bool tensor scalars
-    if isinstance(x, torch.Tensor):
-        return bool(x)
-    if isinstance(x, (np.ndarray,)):
-        return bool(x.all())
-    return bool(x)
-
-
-def _tree_map(fn: Callable[[Any], Any], x):
-    if is_list_or_tuple(x):
-        t = type(x)
-        return t(_tree_map(fn, e) for e in x)
-    return fn(x)
-
-
-def all_none(x, attr: Optional[str] = None) -> bool:
-    get_fn = (lambda x: x) if attr is None else lambda x: getattr(x, attr)
-    return _tree_all_bool(_tree_map(lambda x: get_fn(x) is None, x))
-
-
-def canonicalize_get(get):
     if get is None:
-        return True, get
-
-    if not get:
-        raise ValueError('"get" must be non-empty.')
-
-    get_is_not_tuple = isinstance(get, str)
-    if get_is_not_tuple:
-        get = (get,)
-
-    get = tuple(s.lower() for s in get)
-    if len(set(get)) < len(get):
-        raise ValueError('All entries in "get" must be unique. Got {}'.format(get))
-    return get_is_not_tuple, get
-
-
-_KERNEL_NAMED_TUPLE_CACHE: dict[Any, Any] = {}
-
-
-def _named_tuple_factory(name, get):
-    key = (name, get)
-    if key in _KERNEL_NAMED_TUPLE_CACHE:
-        return _KERNEL_NAMED_TUPLE_CACHE[key]
+        get_nngp = True
+        get_ntk = True
+    elif isinstance(get, str):
+        get_nngp = 'nngp' in get.lower()
+        get_ntk = 'ntk' in get.lower()
     else:
-        _KERNEL_NAMED_TUPLE_CACHE[key] = namedtuple(name, get)
-        return _named_tuple_factory(name, get)
+        get_nngp = any('nngp' in g.lower() for g in get)
+        get_ntk = any('ntk' in g.lower() for g in get)
+        
+    return get_nngp, get_ntk
 
 
-def _output_to_dict(output):
-    if isinstance(output, dict):
-        return output
-
-    if hasattr(output, 'asdict'):
-        return output.asdict()
-
-    if hasattr(output, '_asdict'):
-        return output._asdict()
-
-    if isinstance(output, types.GeneratorType):
-        return (_output_to_dict(out) for out in output)
-
-    raise ValueError(type(output))
+def get_device(x: Optional[torch.Tensor]) -> torch.device:
+    """Get the device of a tensor, defaulting to CPU if tensor is None."""
+    if x is None:
+        return torch.device('cpu')
+    return x.device
 
 
-def wraps(f):
-    def wrapper(g):
-        @functools.wraps(f)
-        def h(*args, **kwargs):
-            return g(*args, **kwargs)
-
-        h.__signature__ = inspect.signature(f)
-        return h
-    return wrapper
+def get_dtype(x: Optional[torch.Tensor]) -> torch.dtype:
+    """Get the dtype of a tensor, defaulting to float32 if tensor is None.""" 
+    if x is None:
+        return torch.float32
+    return x.dtype
 
 
-def get_namedtuple(name):
-    def getter_decorator(fn):
-        try:
-            argspec = inspect.getfullargspec(fn)
-            get_index = argspec.args.index('get')
-            defaults = argspec.defaults
-        except Exception:
-            raise ValueError('`get_namedtuple` functions must have a `get` argument.')
-
-        @wraps(fn)
-        def getter_fn(*args, **kwargs):
-            canonicalized_args = list(args)
-
-            if 'get' in kwargs:
-                get_is_not_tuple, get = canonicalize_get(kwargs['get'])
-                kwargs['get'] = get
-            elif get_index < len(args):
-                get_is_not_tuple, get = canonicalize_get(args[get_index])
-                canonicalized_args[get_index] = get
-            elif defaults is None:
-                raise ValueError(
-                    '`get_namedtuple` function must have a `get` argument provided or '
-                    'set by default.')
-            else:
-                get_is_not_tuple, get = canonicalize_get(defaults[get_index -
-                                                                  len(args)])
-
-            fn_out = fn(*canonicalized_args, **kwargs)
-
-            @nt_tree_fn()
-            def canonicalize_output(out):
-                if get is None:
-                    if isinstance(out, dict):
-                        ReturnType = _named_tuple_factory(name, tuple(out.keys()))
-                        out = ReturnType(*out.values())
-                    return out
-
-                out = _output_to_dict(out)
-
-                if get_is_not_tuple:
-                    if isinstance(out, types.GeneratorType):
-                        return (output[get[0]] for output in out)
-                    else:
-                        return out[get[0]]
-
-                ReturnType = _named_tuple_factory(name, get)
-                if isinstance(out, types.GeneratorType):
-                    return (ReturnType(*tuple(output[g] for g in get)) for output in out)
-                else:
-                    return ReturnType(*tuple(out[g] for g in get))
-
-            return canonicalize_output(fn_out)
-
-        return getter_fn
-
-    return getter_decorator
-
-# -------------------------
-# Array helpers
-# -------------------------
-
-@nt_tree_fn(nargs=2, reduce=lambda x: all(bool(v) for v in x))
-def x1_is_x2(
-    x1: Union[np.ndarray, torch.Tensor],
-    x2: Optional[Union[np.ndarray, torch.Tensor]] = None,
-    eps: float = 1e-12
-) -> Union[bool, torch.Tensor]:
-    if not isinstance(x1, (np.ndarray, torch.Tensor)):
-        raise TypeError('`x1` must be an ndarray/Tensor. A {} is found.'.format(type(x1)))
-
-    if x2 is None:
-        return True
-
-    if x1 is x2:
-        return True
-
-    if tuple(x1.shape) != tuple(x2.shape):
-        return False
-
-    # Looser tolerance for low-precision dtypes:
-    if isinstance(x1, torch.Tensor):
-        if x1.dtype in (torch.float16, torch.bfloat16) or \
-           (isinstance(x2, torch.Tensor) and x2.dtype in (torch.float16, torch.bfloat16)):
-            eps = max(eps, 1e-4)
-
-    try:
-        diff = x1 - x2
-    except TypeError:
-        # inputs are e.g. custom types which don't define subtraction.
-        if isinstance(x1, torch.Tensor) and isinstance(x2, torch.Tensor):
-            return torch.all(x1 == x2)
-        if isinstance(x1, np.ndarray) and isinstance(x2, np.ndarray):
-            return np.all(x1 == x2).item()
-        return x1 == x2
-    else:
-        if isinstance(diff, torch.Tensor):
-            return torch.all(torch.abs(diff) < eps)
-        else:
-            return np.all(np.abs(diff) < eps).item()
-
-
-def _get_ndim(x: Union[int, Sized, np.ndarray, torch.Tensor]) -> int:
-    """Get number of dimensions given number of dimensions / shape / array."""
-    if hasattr(x, 'ndim'):
-        n = int(x.ndim)
-    elif hasattr(x, '__len__'):
-        n = len(x)
-    elif isinstance(x, int):
-        n = x
-    else:
-        raise TypeError(x, type(x))
-    return n
-
-
-def mod(axis: Axes, x: Union[int, Sized, np.ndarray, torch.Tensor]) -> list[int]:
-    """Makes `axis` non-negative given number of dimensions / shape / array."""
-    n = _get_ndim(x)
+def canonicalize_axis(axis: Union[int, Sequence[int]], 
+                     ndim: int) -> Tuple[int, ...]:
+    """Convert axis specification to canonical form.
+    
+    Args:
+        axis: int or sequence of ints specifying axes.
+        ndim: number of dimensions in the array.
+        
+    Returns:
+        Tuple of positive axis indices.
+    """
     if isinstance(axis, int):
-        axis = [axis]
-    return [(i % n) if n > 0 else i for i in axis]
+        axis = (axis,)
+    
+    canonical = []
+    for ax in axis:
+        if ax < 0:
+            ax = ndim + ax
+        if ax < 0 or ax >= ndim:
+            raise ValueError(f"Axis {ax} is out of bounds for array of dimension {ndim}")
+        canonical.append(ax)
+    
+    return tuple(sorted(canonical))
 
 
-def canonicalize_axis(
-    axis: Axes,
-    x: Union[int, Sized, np.ndarray, torch.Tensor]
-) -> list[int]:
-    """Converts axis into a sorted non-negative list."""
-    axis = [axis] if isinstance(axis, int) else list(axis)
-    n = _get_ndim(x)
-    return list(set(np.arange(n)[axis]))
-
-
-def zip_axes(
-    x: torch.Tensor,
-    start_axis: int = 0,
-    end_axis: Optional[int] = None
-) -> torch.Tensor:
-    """Zip (interleave) axes starting from `start_axis`.
-
-    `[..., X, Y, Z, ..., X, Y, Z, ...] -> [..., X, X, ..., Y, Y, ..., Z, Z, ...]`
+def batch_dim_is_leading(batch_axis: Union[int, Sequence[int]], 
+                        ndim: int) -> bool:
+    """Check if batch dimensions are leading dimensions.
+    
+    Args:
+        batch_axis: int or sequence of ints specifying batch axes.
+        ndim: number of dimensions in the array.
+        
+    Returns:
+        True if batch dimensions are leading (0, 1, ..., len(batch_axis)-1).
     """
-    return _zip_axes(x, start_axis, end_axis, unzip=False)
+    if isinstance(batch_axis, int):
+        return batch_axis == 0
+    
+    canonical = canonicalize_axis(batch_axis, ndim)
+    return canonical == tuple(range(len(canonical)))
 
 
-def unzip_axes(x: torch.Tensor,
-               start_axis: int = 0,
-               end_axis: Optional[int] = None) -> torch.Tensor:
-    """Unzip (de-interleave) axes starting from `start_axis`.
-
-    `[..., X, X, ..., Y, Y, ..., Z, Z, ...] -> [..., X, Y, Z, ..., X, Y, Z, ...]`
+def make_2d(x: torch.Tensor) -> torch.Tensor:
+    """Reshape tensor to 2D, flattening all dimensions except the first.
+    
+    Args:
+        x: input tensor of shape (batch_size, ...).
+        
+    Returns:
+        2D tensor of shape (batch_size, -1).
     """
-    return _zip_axes(x, start_axis, end_axis, unzip=True)
+    return x.view(x.shape[0], -1)
 
 
-def _zip_axes(
-    x: torch.Tensor,
-    start_axis: int = 0,
-    end_axis: Optional[int] = None,
-    unzip: bool = False
-) -> torch.Tensor:
+def outer_prod(x: torch.Tensor, y: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """Compute outer product of vectors or matrices.
+    
+    Args:
+        x: first tensor.
+        y: second tensor. If None, computes x ⊗ x.
+        
+    Returns:
+        Outer product tensor.
     """
-    Interleave (zip) or de-interleave (unzip) axes in x[start_axis:end_axis].
-
-    If `unzip=False`:
-      (B, s1, s2, ..., sk,  s1, s2, ..., sk)  ->  (B, s1, s1, s2, s2, ..., sk, sk)
-       ^^^^^^^^^ left block ^^^^^^^^^^^^^^^       ^^^^^^^^^^^^^^^^^ interleaved ^^^^^^^^^^^^^^^^^
-    If `unzip=True`, performs the inverse.
-
-    Works for any number of preceding/following axes and handles degenerate cases.
-    """
-    nd = x.ndim
-    if end_axis is None:
-        end_axis = nd
-
-    # normalize negatives
-    if start_axis < 0: start_axis += nd
-    if end_axis < 0: end_axis += nd
-    if not (0 <= start_axis <= end_axis <= nd):
-        raise ValueError(f"Invalid axis range [{start_axis}, {end_axis}) for ndim={nd}.")
-
-    span = end_axis - start_axis
-    if span == 0:
-        return x  # nothing to do
-    if span % 2 == 1:
-        raise ValueError(f"Need even number of axes to zip/unzip, got {span}.")
-
-    # Build permutation by reordering the positions in [start_axis:end_axis]
-    perm = list(range(nd))
-    block = perm[start_axis:end_axis]
-
-    if unzip:
-        # Current block is interleaved: [l0,r0,l1,r1,...] -> restore to [l0,l1,..., r0,r1,...]
-        left  = block[::2]
-        right = block[1::2]
-        new_block = left + right
-    else:
-        # Current block is unzipped: [l0,l1,..., r0,r1,...] -> interleave to [l0,r0,l1,r1,...]
-        half = span // 2
-        left  = block[:half]
-        right = block[half:]
-        new_block = [v for pair in zip(left, right) for v in pair]
-
-    perm[start_axis:end_axis] = new_block
-    return x.permute(perm)
-
-def zip_axes(x: torch.Tensor, start_axis: int = 0, end_axis: Optional[int] = None) -> torch.Tensor:
-    return _zip_axes(x, start_axis, end_axis, unzip=False)
-
-def unzip_axes(x: torch.Tensor, start_axis: int = 0, end_axis: Optional[int] = None) -> torch.Tensor:
-    return _zip_axes(x, start_axis, end_axis, unzip=True)
-
-
-def diagonal_between(
-    x: torch.Tensor,
-    start_axis: int = 0,
-    end_axis: Optional[int] = None
-) -> torch.Tensor:
-    """Returns the diagonal along all dimensions between start and end axes."""
-    if end_axis is None:
-        end_axis = x.ndim
-
-    half_ndim, ragged = divmod(end_axis - start_axis, 2)
-    if ragged:
-        raise ValueError(
-            f'Need even number of axes to flatten, got {end_axis - start_axis}.')
-    if half_ndim == 0:
-        return x
-
-    side_shape = x.shape[start_axis:start_axis + half_ndim]
-    side_size = size_at(side_shape)
-
-    shape_2d = x.shape[:start_axis] + (side_size, side_size) + x.shape[end_axis:]
-    shape_result = x.shape[:start_axis] + side_shape + x.shape[end_axis:]
-
-    x2d = x.reshape(shape_2d)
-    xdiag = torch.diagonal(x2d, offset=0, dim1=start_axis, dim2=start_axis + 1)
-    xdiag = torch.movedim(xdiag, -1, start_axis)
-    return xdiag.reshape(shape_result)
-
-
-def zip_flat(x, y):
-    return tuple(c for xy in zip(x, y) for c in xy)
-
-
-def interleave_ones(x: torch.Tensor, start_axis: int, end_axis: int, x_first: bool):
-    x_axes = x.shape[start_axis:end_axis]
-    ones = (1,) * (end_axis - start_axis)
-    shape = x.shape[:start_axis]
-    if x_first:
-        shape += zip_flat(x_axes, ones)
-    else:
-        shape += zip_flat(ones, x_axes)
-    shape += x.shape[end_axis:]
-    return x.reshape(shape)
-
-
-def outer_prod(
-    x: torch.Tensor,
-    y: Optional[torch.Tensor],
-    start_axis: int,
-    end_axis: int,
-    prod_op: Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
-) -> torch.Tensor:
     if y is None:
         y = x
-    x_ = interleave_ones(x, start_axis, end_axis, True)
-    y_ = interleave_ones(y, start_axis, end_axis, False)
-    return prod_op(x_, y_)
-
-
-_ArrayOrShape = TypeVar(
-    '_ArrayOrShape',
-    np.ndarray,
-    torch.Tensor,
-    list[int],
-    tuple[int, ...],
-    torch.Size,
-)
-
-
-def reverse_zipped(
-    x: _ArrayOrShape,
-    start_axis: int = 0
-) -> _ArrayOrShape:
-    if x is not None:
-        ndim = _get_ndim(x)
-        source_axes = tuple(j
-                            for i in range(ndim - 2, start_axis - 1, -2)
-                            for j in (i, i + 1))
-
-        if isinstance(x, (np.ndarray, torch.Tensor)):
-            target_axes = range(start_axis, ndim)
-            x = torch.movedim(torch.as_tensor(x), source_axes, target_axes) \
-                if not isinstance(x, torch.Tensor) else torch.movedim(x, source_axes, target_axes)
-        else:
-            x = x[:start_axis] + type(x)(x[i] for i in source_axes)
-    return x
-
-
-def mask(
-    x: Optional[torch.Tensor],
-    mask_mat: Optional[torch.Tensor]
-) -> Optional[torch.Tensor]:
-    if x is None or mask_mat is None:
-        return x
-    # True = masked (blocked). Replace with zeros of same dtype.
-    return torch.where(mask_mat, torch.zeros((), dtype=x.dtype, device=x.device), x)
-
-
-def size_at(
-    x: Union[_ArrayOrShape],
-    axes: Optional[Iterable[int]] = None
-) -> int:
-    if hasattr(x, 'shape'):
-        x = tuple(int(d) for d in x.shape)  # torch.Size -> tuple
-
-    if axes is None:
-        axes = range(len(x))
-
-    out = 1
-    for a in axes:
-        out *= int(x[a])
-    return out
-
-# -------------------------
-# Axis bookkeeping
-# -------------------------
-
-def axis_after_dot(
-    axis: int,
-    contracting_dims: Sequence[int],
-    batch_dims: Sequence[int],
-    lhs_ndim: Optional[int] = None
-) -> int:
-    if axis in batch_dims:
-        return batch_dims.index(axis)
-
-    return (
-        axis -
-        sum(1 for i in contracting_dims if i < axis) +
-        sum(1 for i in batch_dims if i > axis) +
-        (0 if lhs_ndim is None
-         else lhs_ndim - len(batch_dims) - len(contracting_dims))
-    )
-
-# -------------------------
-# Reshaping helpers
-# -------------------------
-
-def make_2d(
-    x: Optional[torch.Tensor],
-    start_axis: int = 0,
-    end_axis: Optional[int] = None
-) -> Optional[torch.Tensor]:
-    """Makes `x` 2D from `start_axis` to `end_axis`, preserving other axes.
-
-    `x` is assumed to follow the (`X, X, Y, Y, Z, Z`) axes layout.
-    """
-    if x is None:
-        return x
-
-    if end_axis is None:
-        end_axis = x.ndim
-
-    x = unzip_axes(x, start_axis, end_axis)
-
-    half_ndim = (end_axis - start_axis) // 2
-    x = x.reshape(x.shape[:start_axis] +
-                  (size_at(x.shape[start_axis:start_axis + half_ndim]),
-                   size_at(x.shape[start_axis + half_ndim:end_axis])) +
-                  x.shape[end_axis:])
-    return x
-
-# -------------------------
-# RNG / kwargs splitting (PyTorch)
-# -------------------------
-
-def _fold_in(gen: torch.Generator, i: int) -> torch.Generator:
-    """Derive a new torch.Generator from an existing one and an integer."""
-    # Use 64-bit hash mixing on the base seed.
-    base = int(gen.initial_seed())
-    mixed = (base ^ (0x9E3779B97F4A7C15 + i + ((base << 6) & ((1<<63)-1)) + (base >> 2))) & ((1<<63)-1)
-    device = getattr(gen, 'device', torch.device('cpu'))
-    new_gen = torch.Generator(device=device)
-    new_gen.manual_seed(mixed)
-    return new_gen
-
-
-def _read_keys(key, x1, x2):
-    """Read dropout key.
-
-    `key` might be a tuple of two RNGs or a single RNG or None. In
-    either case, `key` will be mapped into two RNGs `key1` and `key2` to
-    make sure `(x1==x2) == (key1==key2)`.
-    """
-    if key is None or all_none(x2):
-        key1 = key2 = key
-    elif isinstance(key, tuple) and len(key) == 2:
-        key1, key2 = key
-        # If key1 == key2 but x1 != x2, fold-in to get a different key for x2.
-        # If key1 != key2 but x1 == x2, force key2 = key1.
-        same_keys = (key1 is key2)
-        if same_keys:
-            new_key = _fold_in(key2, 1)
-        else:
-            new_key = key2
-        key2 = key1 if x1_is_x2(x1, x2) else new_key
-        warnings.warn('The value of `key[1]` might be replaced by a new value if '
-                      'key[0] == key[1] and x1 != x2 or key[0] != key[1] and '
-                      'x1 == x2.')
-    elif isinstance(key, torch.Generator):
-        key1 = key
-        key2 = key1 if x1_is_x2(x1, x2) else _fold_in(key1, 1)
+    
+    # Handle different dimensionalities
+    if x.ndim == 1 and y.ndim == 1:
+        return torch.outer(x, y)
+    elif x.ndim == 2 and y.ndim == 2:
+        # Matrix outer product: (i,j) ⊗ (k,l) -> (i,k,j,l)
+        return torch.einsum('ij,kl->ikjl', x, y)
     else:
-        raise TypeError(type(key))
-    return key1, key2
+        raise NotImplementedError(f"Outer product not implemented for shapes {x.shape}, {y.shape}")
 
 
-def split_kwargs(kwargs, x1=None, x2=None):
-    """Splitting `kwargs`.
-
-       Specifically,
-         1. if kwarg is an RNG (`torch.Generator`), it will be split into two RNGs.
-         2. else if it is a tuple of length two, the tuple will be split into two
-            parts, one for kwargs1 and the other for kwargs2.
-         3. else it is copied to kwargs1 and kwargs2.
+def trace(x: torch.Tensor, axis1: int = -2, axis2: int = -1) -> torch.Tensor:
+    """Compute trace along specified axes.
+    
+    Args:
+        x: input tensor.
+        axis1: first axis for trace.
+        axis2: second axis for trace.
+        
+    Returns:
+        Tensor with trace computed.
     """
-    kwargs1 = {}
-    kwargs2 = {}
-    for k, v in kwargs.items():
-        if x2 is not None and k == 'rng':
-            key1, key2 = _read_keys(v, x1, x2)
-            kwargs1[k] = key1
-            kwargs2[k] = key2
-        elif isinstance(v, tuple) and len(v) == 2:
-            kwargs1[k] = v[0]
-            kwargs2[k] = v[1]
-        else:
-            kwargs1[k] = kwargs2[k] = v
-
-    return kwargs1, kwargs2
-
-# -------------------------
-# Slicing helpers
-# -------------------------
-
-_SingleSlice = Union[int, slice, type(Ellipsis)]
-SliceType = Union[_SingleSlice, tuple[_SingleSlice, ...]]
-"""Slice specification type (matches numpy/PyTorch indexing semantics)."""
+    return torch.diagonal(x, dim1=axis1, dim2=axis2).sum(dim=-1)
 
 
-def canonicalize_idx(
-    idx: SliceType,
-    ndim: int
-) -> tuple[Union[int, slice], ...]:
-    if idx is Ellipsis or isinstance(idx, (int, slice)):
-        idx = (idx,) + (slice(None),) * (ndim - 1)
-
-    for i, s in enumerate(idx):
-        if s is Ellipsis:
-            idx = idx[:i] + (slice(None),) * (ndim - len(idx) + 1) + idx[i + 1:]
-
-    idx += (slice(None),) * (ndim - len(idx))
-    return idx
-
-
-def slice_shape(shape: tuple[int, ...], idx: SliceType) -> tuple[int, ...]:
-    # Keep `None` or negative-sized axes if they aren't indexed into.
-    canonical_idx = canonicalize_idx(idx, len(shape))
-
-    np_shape = list(shape)
-    unknown_axes = {}
-    n_ints = 0  # Keep track of vanishing axes due to integer indexing.
-
-    for a, (i, s) in enumerate(zip(canonical_idx, shape)):
-        if s < 0 or s is None:
-            if i == slice(None):
-                np_shape[a] = 0
-                unknown_axes[a - n_ints] = s
-            else:
-                raise ValueError(
-                    f'Trying to index with {i} axis {a} of unknown size {s}. '
-                    f'Please provide input shape {shape} with non-negative integer '
-                    f'size at axis {a}.')
-
-        if isinstance(i, int):
-            n_ints += 1
-
-    out_shape = list(np.empty(np_shape)[idx].shape)
-    for a, v in unknown_axes.items():
-        out_shape[a] = v
-
-    return tuple(out_shape)
-
-
-_T = TypeVar('_T')
-
-
-def double_tuple(x: Iterable[_T]) -> tuple[_T, ...]:
-    return tuple(v for v in x for _ in range(2))
-
-
-def tree_flatten(x):
-    if _pytree is None:
-        raise AttributeError("tree_flatten requires torch>=2.0 (_pytree).")
-    leaves, ctx = _pytree.tree_flatten(x)
-    return leaves, ctx
-
-def tree_unflatten(ctx, leaves):
-    if _pytree is None:
-        raise AttributeError("tree_unflatten requires torch>=2.0 (_pytree).")
-    return _pytree.tree_unflatten(leaves, ctx)
-
-def tree_map(fn, *trees):
-    if _pytree is None:
-        # simple fallback: assume single tree
-        def _map(t):
-            if isinstance(t, dict):
-                return {k: _map(v) for k, v in t.items()}
-            if isinstance(t, (list, tuple)):
-                typ = type(t)
-                return typ(_map(v) for v in t)
-            return fn(t)
-        assert len(trees) == 1
-        return _map(trees[0])
-    return _pytree.tree_map(fn, *trees)
-
-
-def tree_all(x):
-    if isinstance(x, dict):
-        return all(tree_all(v) for v in x.values())
-    elif isinstance(x, (list, tuple)):
-        return all(tree_all(v) for v in x)
-    else:
-        return bool(x)
-
-
-def _generator_device(gen: torch.Generator) -> torch.device:
+def unflatten_axes(x: torch.Tensor, 
+                  axis: int, 
+                  new_shape: Sequence[int]) -> torch.Tensor:
+    """Unflatten a single axis into multiple axes.
+    
+    Args:
+        x: input tensor.
+        axis: axis to unflatten.
+        new_shape: shape to unflatten into.
+        
+    Returns:
+        Tensor with axis unflattened.
     """
-    Return the device associated with a torch.Generator.
-    Falls back to CPU if the attribute is unavailable.
-    """
-    dev = getattr(gen, "device", None)
-    return torch.device(dev) if dev is not None else torch.device("cpu")
-
-
-def as_seed(x: Optional[Union[int, np.integer, torch.Generator]]) -> int:
-    """
-    Convert a variety of 'seed-like' inputs to a Python int.
-
-    - If x is an int/np.integer: return int(x).
-    - If x is a torch.Generator: draw a 64-bit seed from it on its device.
-      (This consumes RNG state, which is fine for deterministic splitting.)
-    - If x is None: use torch.seed() to create a fresh process-wide seed.
-    """
-    if x is None:
-        # torch.seed() returns a random 64-bit seed and sets the default generator.
-        # We only need the value.
-        return int(torch.seed())
-
-    if isinstance(x, (int, np.integer)):
-        return int(x)
-
-    if isinstance(x, torch.Generator):
-        dev = _generator_device(x)
-        # Draw a 64-bit value without host roundtrips; matches the generator's device.
-        val = torch.randint(
-            0, 2**63 - 1, (1,), generator=x, device=dev, dtype=torch.int64
-        ).item()
-        return int(val)
-
-    raise TypeError(f"Unsupported seed-like object: {type(x)}")
+    if axis < 0:
+        axis = x.ndim + axis
+    
+    shape = list(x.shape)
+    old_size = shape.pop(axis)
+    
+    if old_size != torch.prod(torch.tensor(new_shape)).item():
+        raise ValueError(f"Cannot unflatten axis of size {old_size} into shape {new_shape}")
+    
+    new_full_shape = shape[:axis] + list(new_shape) + shape[axis:]
+    return x.view(new_full_shape)
