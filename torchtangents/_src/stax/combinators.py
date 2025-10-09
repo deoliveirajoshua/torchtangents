@@ -136,10 +136,26 @@ def parallel(*layers: InternalLayer) -> InternalLayer:
                 result_kernel = layer_result
             else:
                 # Add the kernels (this is simplified)
+                # Use replace() since Kernel is a frozen dataclass
+                from dataclasses import replace
+                new_nngp = None
+                new_ntk = None
+                
                 if result_kernel.nngp is not None and layer_result.nngp is not None:
-                    result_kernel.nngp = result_kernel.nngp + layer_result.nngp
+                    new_nngp = result_kernel.nngp + layer_result.nngp
+                elif result_kernel.nngp is not None:
+                    new_nngp = result_kernel.nngp
+                elif layer_result.nngp is not None:
+                    new_nngp = layer_result.nngp
+                    
                 if result_kernel.ntk is not None and layer_result.ntk is not None:
-                    result_kernel.ntk = result_kernel.ntk + layer_result.ntk
+                    new_ntk = result_kernel.ntk + layer_result.ntk
+                elif result_kernel.ntk is not None:
+                    new_ntk = result_kernel.ntk
+                elif layer_result.ntk is not None:
+                    new_ntk = layer_result.ntk
+                
+                result_kernel = replace(result_kernel, nngp=new_nngp, ntk=new_ntk)
         
         return result_kernel
     

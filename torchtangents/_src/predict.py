@@ -72,14 +72,9 @@ def _solve_kernel_regression(k_train_train: torch.Tensor,
     else:
         k_reg = k_train_train
     
-    # Solve linear system
-    try:
-        # Try Cholesky decomposition first (more stable)
-        L = torch.linalg.cholesky(k_reg)
-        alpha = torch.cholesky_solve(y_train, L)
-    except RuntimeError:
-        # Fall back to general linear solve
-        alpha = torch.linalg.solve(k_reg, y_train)
+    # Solve linear system using general linear solve
+    # Note: linalg.solve is more numerically stable than cholesky_solve for ill-conditioned matrices
+    alpha = torch.linalg.solve(k_reg, y_train)
     
     return alpha
 
@@ -116,9 +111,17 @@ def gradient_descent_mse(k_train_train: torch.Tensor,
     
     # Handle regularization scaling
     if not diag_reg_absolute_scale and diag_reg > 0:
-        trace_val = torch.trace(k_train_train).item()
+        # Handle scalar kernels
+        if k_train_train.ndim == 0:
+            trace_val = k_train_train.item()
+        elif k_train_train.ndim >= 2:
+            trace_val = torch.trace(k_train_train).item()
+        else:
+            # For 1D, sum all elements
+            trace_val = k_train_train.sum().item()
+        
         # Handle edge case where kernel has zero trace (e.g., zero kernel)
-        if trace_val > 0:
+        if trace_val > 0 and k_train_train.shape[0] > 0:
             diag_reg = diag_reg * trace_val / k_train_train.shape[0]
         # If trace is zero, keep original diag_reg value (absolute scale)
     

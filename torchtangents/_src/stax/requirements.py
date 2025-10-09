@@ -808,7 +808,7 @@ def _inputs_to_kernel(
   x2, cov2, mask2 = get_x_cov_mask(x2)
   nngp = _cov(x1, x2, diagonal_spatial, batch_axis, channel_axis)
 
-  ntk = torch.zeros((), nngp.dtype) if compute_ntk else None  # pytype: disable=attribute-error  # always-use-return-annotations
+  ntk = torch.zeros((), dtype=nngp.dtype) if compute_ntk else None  # pytype: disable=attribute-error  # always-use-return-annotations
   is_gaussian = False
   is_reversed = False
   x1_is_x2 = utils.x1_is_x2(x1, x2, eps=eps)
