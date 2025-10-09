@@ -262,8 +262,9 @@ def x1_is_x2(
   if x1.shape != x2.shape:
     return False
 
-  if torch.default_backend() == 'tpu':
-    eps = 1e-4
+  # PyTorch doesn't have default_backend() like JAX
+  # Using standard epsilon for all devices
+  eps = 1e-4
 
   try:
     diff = x1 - x2
@@ -379,6 +380,10 @@ def _zip_axes(
   if end_axis is None:
     end_axis = x.ndim
 
+  # Handle cases where there are no axes to zip (scalar or start_axis >= end_axis)
+  if start_axis >= end_axis:
+    return x
+
   half_ndim, ragged = divmod(end_axis - start_axis, 2)
   if ragged:
     raise ValueError(
@@ -465,7 +470,9 @@ def reverse_zipped(
 
     if isinstance(x, torch.Tensor):
       target_axes = tuple(range(start_axis, ndim))
-      x = torch.moveaxis(x, source_axes, target_axes)
+      # Only move axes if there are any to move
+      if len(source_axes) > 0 and len(source_axes) == len(target_axes):
+        x = torch.moveaxis(x, source_axes, target_axes)
     else:
       x = x[:start_axis] + type(x)(x[i] for i in source_axes)
   return x

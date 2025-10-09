@@ -43,7 +43,7 @@ def FanOut(num_outputs: int) -> InternalLayer:
         return [inputs] * num_outputs
     
     @layer
-    def kernel_fn(kernel: Kernel) -> List[Kernel]:
+    def kernel_fn(kernel: Kernel, **kwargs) -> List[Kernel]:
         """Fan out kernel to multiple identical kernels."""
         return [kernel] * num_outputs
     
@@ -83,7 +83,7 @@ def FanInSum(*ignore_axis: int) -> InternalLayer:
         return result
     
     @layer
-    def kernel_fn(kernels: List[Kernel]) -> Kernel:
+    def kernel_fn(kernels: List[Kernel], **kwargs) -> Kernel:
         """Combine kernels through summation."""
         if len(kernels) == 1:
             return kernels[0]
@@ -156,7 +156,7 @@ def FanInProd(*ignore_axis: int) -> InternalLayer:
         return result
     
     @layer
-    def kernel_fn(kernels: List[Kernel]) -> Kernel:
+    def kernel_fn(kernels: List[Kernel], **kwargs) -> Kernel:
         """Combine kernels through element-wise product."""
         if len(kernels) == 1:
             return kernels[0]
@@ -244,7 +244,7 @@ def FanInConcat(axis: int = -1) -> InternalLayer:
         return torch.cat(inputs, dim=axis)
     
     @layer
-    def kernel_fn(kernels: List[Kernel]) -> Kernel:
+    def kernel_fn(kernels: List[Kernel], **kwargs) -> Kernel:
         """Combine kernels through concatenation."""
         if len(kernels) == 1:
             return kernels[0]

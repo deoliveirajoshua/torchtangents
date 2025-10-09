@@ -64,10 +64,10 @@ def serial(*layers: InternalLayer) -> InternalLayer:
         
         return outputs
     
-    def kernel_fn(kernel: Kernel) -> Kernel:
+    def kernel_fn(kernel: Kernel, **kwargs) -> Kernel:
         """Apply all kernel functions in sequence."""
         for _, _, layer_kernel in layers:
-            kernel = layer_kernel(kernel)
+            kernel = layer_kernel(kernel, **kwargs)
         return kernel
     
     return init_fn, apply_fn, kernel_fn
@@ -118,7 +118,7 @@ def parallel(*layers: InternalLayer) -> InternalLayer:
         
         return tuple(outputs)
     
-    def kernel_fn(kernel: Kernel) -> Kernel:
+    def kernel_fn(kernel: Kernel, **kwargs) -> Kernel:
         """Apply parallel composition to kernel.
         
         For parallel layers, the kernel is computed as the sum of
@@ -131,7 +131,7 @@ def parallel(*layers: InternalLayer) -> InternalLayer:
         
         result_kernel = None
         for _, _, layer_kernel in layers:
-            layer_result = layer_kernel(kernel)
+            layer_result = layer_kernel(kernel, **kwargs)
             if result_kernel is None:
                 result_kernel = layer_result
             else:

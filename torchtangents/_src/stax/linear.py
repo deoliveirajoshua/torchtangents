@@ -162,7 +162,7 @@ def Dense(out_dim: int,
         return outputs
     
     @requires(diagonal_spatial=Diagonal.EITHER)
-    def kernel_fn(kernel: Kernel) -> Kernel:
+    def kernel_fn(kernel: Kernel, **kwargs) -> Kernel:
         """Transform kernel through Dense layer."""
         def fc(x):
             return _affine(x, W_std, b_std)
@@ -212,7 +212,7 @@ def Identity() -> InternalLayer:
                 rng: Optional[torch.Generator] = None, **kwargs) -> torch.Tensor:
         return inputs
     
-    def kernel_fn(kernel: Kernel) -> Kernel:
+    def kernel_fn(kernel: Kernel, **kwargs) -> Kernel:
         return kernel
     
     return init_fn, apply_fn, kernel_fn
@@ -241,7 +241,7 @@ def Flatten() -> InternalLayer:
         batch_size = inputs.shape[0]
         return inputs.view(batch_size, -1)
     
-    def kernel_fn(kernel: Kernel) -> Kernel:
+    def kernel_fn(kernel: Kernel, **kwargs) -> Kernel:
         """Flatten spatial dimensions in kernel.
         
         This changes the kernel to have diagonal_spatial=True since
@@ -292,7 +292,7 @@ def Dropout(rate: float,
             return inputs
         return F.dropout(inputs, p=rate, training=True)
     
-    def kernel_fn(kernel: Kernel) -> Kernel:
+    def kernel_fn(kernel: Kernel, **kwargs) -> Kernel:
         """Transform kernel through Dropout.
         
         In the infinite width limit, dropout acts as a scaling factor.
@@ -351,7 +351,7 @@ def Index(index) -> InternalLayer:
         return inputs[index]
     
     @requires(diagonal_spatial=Diagonal.EITHER)
-    def kernel_fn(kernel: Kernel) -> Kernel:
+    def kernel_fn(kernel: Kernel, **kwargs) -> Kernel:
         """Transform kernel through indexing."""
         # Indexing affects the spatial dimensions
         def index_cov(cov):
@@ -525,7 +525,7 @@ def Conv(out_channels: int,
             return output
     
     @requires(diagonal_spatial=Diagonal.EITHER)
-    def kernel_fn(kernel: Kernel) -> Kernel:
+    def kernel_fn(kernel: Kernel, **kwargs) -> Kernel:
         """Transform kernel through convolution."""
         # Convolution kernel computation is complex
         # This is a placeholder implementation
@@ -604,7 +604,7 @@ def ConvTranspose(out_channels: int,
         return output
     
     @requires(diagonal_spatial=Diagonal.EITHER)
-    def kernel_fn(kernel: Kernel) -> Kernel:
+    def kernel_fn(kernel: Kernel, **kwargs) -> Kernel:
         """Transform kernel through transpose convolution."""
         return kernel.replace(is_gaussian=True)
     
@@ -645,7 +645,7 @@ def AvgPool(window_shape: Tuple[int, ...],
                            f"TorchTangents currently supports 1D, 2D, and 3D average pooling.")
     
     @requires(diagonal_spatial=Diagonal.EITHER)
-    def kernel_fn(kernel: Kernel) -> Kernel:
+    def kernel_fn(kernel: Kernel, **kwargs) -> Kernel:
         """Transform kernel through average pooling."""
         # Pooling reduces spatial dimensions
         return kernel.replace(is_gaussian=True)
@@ -689,7 +689,7 @@ def SumPool(window_shape: Tuple[int, ...],
                            f"TorchTangents currently supports 1D, 2D, and 3D sum pooling.")
     
     @requires(diagonal_spatial=Diagonal.EITHER)
-    def kernel_fn(kernel: Kernel) -> Kernel:
+    def kernel_fn(kernel: Kernel, **kwargs) -> Kernel:
         """Transform kernel through sum pooling."""
         return kernel.replace(is_gaussian=True)
     
@@ -728,7 +728,7 @@ def GlobalAvgPool() -> InternalLayer:
         return output
     
     @requires(diagonal_spatial=Diagonal.EITHER)
-    def kernel_fn(kernel: Kernel) -> Kernel:
+    def kernel_fn(kernel: Kernel, **kwargs) -> Kernel:
         """Transform kernel through global average pooling."""
         return kernel.replace(is_gaussian=True)
     
@@ -753,7 +753,7 @@ def GlobalSumPool() -> InternalLayer:
         return torch.sum(inputs, dim=spatial_dims, keepdim=True)
     
     @requires(diagonal_spatial=Diagonal.EITHER)
-    def kernel_fn(kernel: Kernel) -> Kernel:
+    def kernel_fn(kernel: Kernel, **kwargs) -> Kernel:
         """Transform kernel through global sum pooling."""
         return kernel.replace(is_gaussian=True)
     
@@ -805,7 +805,7 @@ def DotGeneral(dimension_numbers, precision=None) -> InternalLayer:
         return torch.matmul(lhs, rhs)
     
     @requires(diagonal_spatial=Diagonal.EITHER)
-    def kernel_fn(kernel: Kernel) -> Kernel:
+    def kernel_fn(kernel: Kernel, **kwargs) -> Kernel:
         """Transform kernel through dot product."""
         return kernel.replace(is_gaussian=True)
     
@@ -865,7 +865,7 @@ def Aggregate(
             raise ValueError(f'Unrecognized implementation: {implementation}')
     
     @requires(diagonal_spatial=Diagonal.EITHER)
-    def kernel_fn(kernel: Kernel) -> Kernel:
+    def kernel_fn(kernel: Kernel, **kwargs) -> Kernel:
         """Transform kernel through aggregation."""
         # Aggregation affects spatial structure
         # This is a simplified implementation
@@ -965,7 +965,7 @@ def ConvLocal(
         return output
     
     @requires(diagonal_spatial=Diagonal.EITHER)
-    def kernel_fn(kernel: Kernel) -> Kernel:
+    def kernel_fn(kernel: Kernel, **kwargs) -> Kernel:
         """Transform kernel through locally connected layer."""
         # Locally connected layers break translation invariance
         return kernel.replace(
@@ -1133,7 +1133,7 @@ def GlobalSelfAttention(
         return output
     
     @requires(diagonal_spatial=Diagonal.EITHER)
-    def kernel_fn(kernel: Kernel) -> Kernel:
+    def kernel_fn(kernel: Kernel, **kwargs) -> Kernel:
         """Transform kernel through self-attention."""
         if not linear_scaling:
             raise NotImplementedError(
@@ -1216,7 +1216,7 @@ def ImageResize(
         return resized
     
     @requires(diagonal_spatial=Diagonal.EITHER)
-    def kernel_fn(kernel: Kernel) -> Kernel:
+    def kernel_fn(kernel: Kernel, **kwargs) -> Kernel:
         """Transform kernel through image resizing."""
         if shape[channel_axis] != -1:
             raise ValueError('Resizing channel axis not supported in kernel_fn')
@@ -1267,7 +1267,7 @@ def LayerNorm(
         return normalized
     
     @requires(diagonal_spatial=Diagonal.EITHER)
-    def kernel_fn(kernel: Kernel) -> Kernel:
+    def kernel_fn(kernel: Kernel, **kwargs) -> Kernel:
         """Transform kernel through layer normalization."""
         if not kernel.is_gaussian:
             raise NotImplementedError('LayerNorm only implemented for Gaussian inputs.')

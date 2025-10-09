@@ -548,7 +548,7 @@ def _cov_full_batch_full_spatial(
     batch_axis: int,
     channel_axis: int
 ) -> torch.Tensor:
-  ret = torch.tensordot(x1, x2, (channel_axis, channel_axis))
+  ret = torch.tensordot(x1, x2, ([channel_axis], [channel_axis]))
   new_batch_axis = batch_axis - (1 if batch_axis > channel_axis else 0)
   ret = torch.moveaxis(ret, (new_batch_axis, x1.ndim - 1 + new_batch_axis),
                      (0, 1))
