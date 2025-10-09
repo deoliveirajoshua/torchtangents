@@ -19,15 +19,14 @@ import torch
 from ..utils.kernel import Kernel
 
 PyTree = Any
-"""A PyTree, see `JAX docs`_ for details.
-
-.. _JAX docs: https://jax.readthedocs.io/en/latest/pytrees.html
-"""
+# A PyTree, see `JAX docs`_ for details.
+# _JAX docs: https://jax.readthedocs.io/en/latest/pytrees.html
+#
 
 
 Axes = Union[int, Sequence[int]]
-"""Axes specification, can be integers (`axis=-1`) or sequences (`axis=(1, 3)`).
-"""
+# Axes specification, can be integers (`axis=-1`) or sequences (`axis=(1, 3)`).
+
 
 
 T = TypeVar('T')
@@ -38,26 +37,13 @@ if TYPE_CHECKING:
 else:
   # Can't use recursive types with `sphinx-autodoc-typehints`.
   NTTree = Union[list[T], tuple[T, ...], T]
-  """Neural Tangents Tree.
-
-  Trees of kernels and arrays naturally emerge in certain neural
-  network computations (for example, when neural networks have nested parallel
-  layers).
-
-  Mimicking JAX, we use a lightweight tree structure called an :class:`NTTree`.
-  :class:`NTTree` has internal nodes that are either lists or tuples and leaves
-  which are either :class:`jax.numpy.ndarray` or
-  :class:`~neural_tangents.Kernel` objects.
-  """
-
   NTTrees = Union[list[T], tuple[T, ...]]
-  """A list or tuple of :class:`NTTree` s.
-  """
+  # A list or tuple of :class:`NTTree` s.
 
 
 Shapes = NTTree[tuple[int, ...]]
-"""A shape - a tuple of integers, or an :class:`NTTree` of such tuples.
-"""
+# A shape - a tuple of integers, or an :class:`NTTree` of such tuples.
+
 
 
 # Layer Definition.
