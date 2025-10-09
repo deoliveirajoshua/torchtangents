@@ -514,6 +514,10 @@ class Diagonal:
   __rand__ = __and__
 
 
+# Class constants for Diagonal requirements
+Diagonal.EITHER = Diagonal(input=Bool.MAYBE, output=Bool.MAYBE)
+
+
 def _cov_diag_batch_diag_spatial(
     x: torch.Tensor,
     batch_axis: int,
@@ -530,10 +534,10 @@ def _cov_diag_batch_full_spatial(
     batch_axis: int,
     channel_axis: int
 ) -> torch.Tensor:
-  ret = lax.dot_general(x, x,
-                        (((channel_axis,), (channel_axis,)),
-                         ((batch_axis,), (batch_axis,)))
-                        )
+  # Convert lax.dot_general to torch.tensordot
+  # Original: lax.dot_general(x, x, (((channel_axis,), (channel_axis,)), ((batch_axis,), (batch_axis,))))
+  # This computes a tensor contraction over channel_axis and batch_axis
+  ret = torch.tensordot(x, x, dims=([channel_axis, batch_axis], [channel_axis, batch_axis]))
   ret = utils.zip_axes(ret, 1)
   return ret
 
@@ -560,10 +564,11 @@ def _cov_full_batch_diag_spatial(
 ) -> torch.Tensor:
   diag_axes = tuple(i for i in range(x1.ndim)
                     if i != batch_axis and i != channel_axis)
-  ret = lax.dot_general(x1, x2,
-                        (((channel_axis,), (channel_axis,)),
-                         (diag_axes, diag_axes))
-                        )
+  # Convert lax.dot_general to torch.tensordot  
+  # Original: lax.dot_general(x1, x2, (((channel_axis,), (channel_axis,)), (diag_axes, diag_axes)))
+  # This contracts over channel_axis and diagonal spatial axes
+  contract_dims = ([channel_axis] + list(diag_axes), [channel_axis] + list(diag_axes))
+  ret = torch.tensordot(x1, x2, dims=contract_dims)
   ret = torch.moveaxis(ret, (-2, -1), (0, 1))
   return ret
 
@@ -790,7 +795,7 @@ def _inputs_to_kernel(
     x, mask = x.masked_value, x.mask
 
     # TODO(schsam): Think more about dtype automatic vs manual dtype promotion.
-    x = x.astype(jax.dtypes.canonicalize_dtype(torch.float64))
+    x = x.to(dtype=torch.float64)
 
     if diagonal_batch:
       cov = _cov_diag_batch(x, diagonal_spatial, batch_axis, channel_axis)
@@ -839,12 +844,17 @@ def _propagate_shape(
   def init_and_apply(rng, x):
     _, params = init_fn(rng, tree_map(lambda x: x.shape, x))
     return apply_fn(params, x, rng=rng, **kwargs)
-  akey = jax.eval_shape(jax.random.PRNGKey, 0)
+  
+  # Create a dummy generator for shape inference (replaces jax.random.PRNGKey)
+  rng = torch.Generator()
   try:
-    shaped = eval_shape(init_and_apply, akey, shaped)
-  except NotImplementedError:
-    # Some layers do not implement an `apply_fn` and in this case we keep the
-    # shape constant.
+    # Use PyTorch's shape inference by running with meta tensors
+    # This replaces jax.eval_shape functionality
+    with torch.device('meta'):
+      shaped = init_and_apply(rng, shaped)
+  except (NotImplementedError, RuntimeError):
+    # Some layers do not implement an `apply_fn` or don't support meta tensors
+    # In this case we keep the shape constant.
     pass
 
   if isinstance(shaped, MaskedArray):
