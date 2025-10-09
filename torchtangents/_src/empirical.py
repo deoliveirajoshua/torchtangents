@@ -362,13 +362,64 @@ def empirical_kernel_fn(f: Callable,
         
         if get is None:
             # Return Kernel object
-            return Kernel(nngp=nngp, ntk=ntk, x1_is_x2=(x2 is None))
+            cov1 = torch.diagonal(nngp, dim1=0, dim2=1) if nngp is not None else None
+            cov2 = cov1 if x2 is None else None
+            return Kernel(
+                nngp=nngp, 
+                ntk=ntk, 
+                cov1=cov1,
+                cov2=cov2,
+                x1_is_x2=torch.tensor(x2 is None),
+                is_gaussian=False,
+                is_reversed=False,
+                is_input=False,
+                diagonal_batch=True,
+                diagonal_spatial=True,
+                shape1=x1.shape,
+                shape2=x1.shape if x2 is None else x2.shape,
+                batch_axis=0,
+                channel_axis=1
+            )
         elif isinstance(get, str):
             # Return Kernel object with only requested field
             if 'nngp' in get.lower():
-                return Kernel(nngp=nngp, ntk=None, x1_is_x2=(x2 is None))
+                cov1 = torch.diagonal(nngp, dim1=0, dim2=1) if nngp is not None else None
+                cov2 = cov1 if x2 is None else None
+                return Kernel(
+                    nngp=nngp, 
+                    ntk=None, 
+                    cov1=cov1,
+                    cov2=cov2,
+                    x1_is_x2=torch.tensor(x2 is None),
+                    is_gaussian=False,
+                    is_reversed=False,
+                    is_input=False,
+                    diagonal_batch=True,
+                    diagonal_spatial=True,
+                    shape1=x1.shape,
+                    shape2=x1.shape if x2 is None else x2.shape,
+                    batch_axis=0,
+                    channel_axis=1
+                )
             elif 'ntk' in get.lower():
-                return Kernel(nngp=None, ntk=ntk, x1_is_x2=(x2 is None))
+                cov1 = torch.diagonal(ntk, dim1=0, dim2=1) if ntk is not None else None
+                cov2 = cov1 if x2 is None else None
+                return Kernel(
+                    nngp=None, 
+                    ntk=ntk, 
+                    cov1=cov1,
+                    cov2=cov2,
+                    x1_is_x2=torch.tensor(x2 is None),
+                    is_gaussian=False,
+                    is_reversed=False,
+                    is_input=False,
+                    diagonal_batch=True,
+                    diagonal_spatial=True,
+                    shape1=x1.shape,
+                    shape2=x1.shape if x2 is None else x2.shape,
+                    batch_axis=0,
+                    channel_axis=1
+                )
             else:
                 raise ValueError(f"Unknown get value: {get}")
         else:
@@ -382,7 +433,31 @@ def empirical_kernel_fn(f: Callable,
                     result_ntk = ntk
                 else:
                     raise ValueError(f"Unknown get value: {g}")
-            return Kernel(nngp=result_nngp, ntk=result_ntk, x1_is_x2=(x2 is None))
+            
+            # Create appropriate covariances
+            cov1 = None
+            if result_nngp is not None:
+                cov1 = torch.diagonal(result_nngp, dim1=0, dim2=1)
+            elif result_ntk is not None:
+                cov1 = torch.diagonal(result_ntk, dim1=0, dim2=1)
+            cov2 = cov1 if x2 is None else None
+            
+            return Kernel(
+                nngp=result_nngp, 
+                ntk=result_ntk, 
+                cov1=cov1,
+                cov2=cov2,
+                x1_is_x2=torch.tensor(x2 is None),
+                is_gaussian=False,
+                is_reversed=False,
+                is_input=False,
+                diagonal_batch=True,
+                diagonal_spatial=True,
+                shape1=x1.shape,
+                shape2=x1.shape if x2 is None else x2.shape,
+                batch_axis=0,
+                channel_axis=1
+            )
     
     return kernel_fn
 

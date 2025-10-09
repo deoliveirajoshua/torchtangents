@@ -86,7 +86,7 @@ def _preprocess_kernel_fn(init_fn, apply_fn, kernel_fn):
                 cov2=cov2,
                 nngp=nngp,
                 ntk=ntk,
-                x1_is_x2=(x2 is None),
+                x1_is_x2=torch.tensor(x2 is None),
                 is_gaussian=True,
                 is_reversed=False,
                 is_input=True,
@@ -94,6 +94,8 @@ def _preprocess_kernel_fn(init_fn, apply_fn, kernel_fn):
                 diagonal_spatial=False,
                 shape1=tuple(x1_t.shape),
                 shape2=tuple(x1_t.shape) if x2 is None else tuple(x2_t.shape),
+                batch_axis=0,
+                channel_axis=1
             )
             
             # Apply the raw kernel function

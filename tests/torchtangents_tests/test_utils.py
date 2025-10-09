@@ -31,12 +31,29 @@ class TestKernel:
         """Test basic kernel creation."""
         nngp = torch.randn(3, 3)
         ntk = torch.randn(3, 3)
+        cov1 = torch.randn(3, 3)
+        x1_is_x2 = torch.tensor(True)
         
-        kernel = Kernel(nngp=nngp, ntk=ntk)
+        kernel = Kernel(
+            nngp=nngp, 
+            ntk=ntk,
+            cov1=cov1,
+            cov2=None,
+            x1_is_x2=x1_is_x2,
+            is_gaussian=True,
+            is_reversed=False,
+            is_input=False,
+            diagonal_batch=True,
+            diagonal_spatial=False,
+            shape1=(3, 3),
+            shape2=(3, 3),
+            batch_axis=0,
+            channel_axis=1
+        )
         
         assert kernel.nngp is nngp
         assert kernel.ntk is ntk
-        assert kernel.cov1 is None
+        assert kernel.cov1 is cov1
         assert kernel.cov2 is None
         assert kernel.is_gaussian is True
         assert kernel.is_reversed is False
@@ -47,27 +64,30 @@ class TestKernel:
         ntk = torch.randn(3, 3)
         cov1 = torch.randn(3, 3)
         cov2 = torch.randn(3, 3)
+        x1_is_x2 = torch.tensor(True)
         
         kernel = Kernel(
             nngp=nngp,
             ntk=ntk,
             cov1=cov1,
             cov2=cov2,
-            x1_is_x2=True,
+            x1_is_x2=x1_is_x2,
             is_gaussian=False,
             is_reversed=True,
             is_input=True,
             diagonal_batch=False,
             diagonal_spatial=True,
             shape1=(10, 5),
-            shape2=(8, 5)
+            shape2=(8, 5),
+            batch_axis=0,
+            channel_axis=1
         )
         
         assert kernel.nngp is nngp
         assert kernel.ntk is ntk
         assert kernel.cov1 is cov1
         assert kernel.cov2 is cov2
-        assert kernel.x1_is_x2 is True
+        assert torch.equal(kernel.x1_is_x2, x1_is_x2)
         assert kernel.is_gaussian is False
         assert kernel.is_reversed is True
         assert kernel.is_input is True
@@ -78,9 +98,26 @@ class TestKernel:
     
     def test_kernel_replace_method(self):
         """Test kernel replace functionality."""
+        nngp_original = torch.randn(2, 2)
+        ntk_original = torch.randn(2, 2)
+        cov1_original = torch.randn(2, 2)
+        x1_is_x2_original = torch.tensor(True)
+        
         original = Kernel(
-            nngp=torch.randn(2, 2),
-            ntk=torch.randn(2, 2)
+            nngp=nngp_original,
+            ntk=ntk_original,
+            cov1=cov1_original,
+            cov2=None,
+            x1_is_x2=x1_is_x2_original,
+            is_gaussian=True,
+            is_reversed=False,
+            is_input=False,
+            diagonal_batch=True,
+            diagonal_spatial=False,
+            shape1=(2, 2),
+            shape2=(2, 2),
+            batch_axis=0,
+            channel_axis=1
         )
         
         new_nngp = torch.randn(3, 3)
@@ -92,9 +129,25 @@ class TestKernel:
     
     def test_kernel_reverse_method(self):
         """Test kernel reverse functionality."""
+        nngp = torch.randn(2, 2)
+        cov1 = torch.randn(2, 2)
+        x1_is_x2 = torch.tensor(False)
+        
         kernel = Kernel(
-            nngp=torch.randn(2, 2),
-            is_reversed=False
+            nngp=nngp,
+            ntk=None,
+            cov1=cov1,
+            cov2=None,
+            x1_is_x2=x1_is_x2,
+            is_gaussian=True,
+            is_reversed=False,
+            is_input=False,
+            diagonal_batch=True,
+            diagonal_spatial=False,
+            shape1=(2, 2),
+            shape2=(2, 2),
+            batch_axis=0,
+            channel_axis=1
         )
         
         reversed_kernel = kernel.reverse()
@@ -229,7 +282,25 @@ class TestKernelAdvanced:
         # Test with different dtypes
         for dtype in [torch.float32, torch.float64]:
             nngp = torch.randn(2, 2, dtype=dtype)
-            kernel = Kernel(nngp=nngp)
+            cov1 = torch.randn(2, 2, dtype=dtype)
+            x1_is_x2 = torch.tensor(True)
+            
+            kernel = Kernel(
+                nngp=nngp,
+                ntk=None,
+                cov1=cov1,
+                cov2=None,
+                x1_is_x2=x1_is_x2,
+                is_gaussian=True,
+                is_reversed=False,
+                is_input=False,
+                diagonal_batch=True,
+                diagonal_spatial=False,
+                shape1=(2, 2),
+                shape2=(2, 2),
+                batch_axis=0,
+                channel_axis=1
+            )
             
             assert kernel.nngp.dtype == dtype
     
@@ -241,8 +312,25 @@ class TestKernelAdvanced:
         for shape in shapes:
             nngp = torch.randn(*shape)
             ntk = torch.randn(*shape)
+            cov1 = torch.randn(*shape)
+            x1_is_x2 = torch.tensor(True)
             
-            kernel = Kernel(nngp=nngp, ntk=ntk)
+            kernel = Kernel(
+                nngp=nngp, 
+                ntk=ntk,
+                cov1=cov1,
+                cov2=None,
+                x1_is_x2=x1_is_x2,
+                is_gaussian=True,
+                is_reversed=False,
+                is_input=False,
+                diagonal_batch=True,
+                diagonal_spatial=False,
+                shape1=shape,
+                shape2=shape,
+                batch_axis=0,
+                channel_axis=1
+            )
             
             assert kernel.nngp.shape == shape
             assert kernel.ntk.shape == shape
@@ -250,10 +338,25 @@ class TestKernelAdvanced:
     def test_kernel_shape_validation(self):
         """Test kernel shape properties."""
         # Test with shape information
+        nngp = torch.randn(4, 4)
+        cov1 = torch.randn(4, 4)
+        x1_is_x2 = torch.tensor(False)
+        
         kernel = Kernel(
-            nngp=torch.randn(4, 4),
+            nngp=nngp,
+            ntk=None,
+            cov1=cov1,
+            cov2=None,
+            x1_is_x2=x1_is_x2,
+            is_gaussian=True,
+            is_reversed=False,
+            is_input=False,
+            diagonal_batch=True,
+            diagonal_spatial=False,
             shape1=(10, 5, 3),
-            shape2=(8, 5, 3)
+            shape2=(8, 5, 3),
+            batch_axis=0,
+            channel_axis=1
         )
         
         assert kernel.shape1 == (10, 5, 3)
@@ -261,17 +364,28 @@ class TestKernelAdvanced:
     
     def test_kernel_boolean_properties(self):
         """Test boolean properties of kernels."""
+        nngp = torch.randn(2, 2)
+        cov1 = torch.randn(2, 2)
+        x1_is_x2 = torch.tensor(True)
+        
         kernel = Kernel(
-            nngp=torch.randn(2, 2),
-            x1_is_x2=True,
+            nngp=nngp,
+            ntk=None,
+            cov1=cov1,
+            cov2=None,
+            x1_is_x2=x1_is_x2,
             is_gaussian=False,
             is_reversed=True,
             is_input=False,
             diagonal_batch=False,
-            diagonal_spatial=True
+            diagonal_spatial=True,
+            shape1=(2, 2),
+            shape2=(2, 2),
+            batch_axis=0,
+            channel_axis=1
         )
         
-        assert kernel.x1_is_x2 is True
+        assert torch.equal(kernel.x1_is_x2, x1_is_x2)
         assert kernel.is_gaussian is False
         assert kernel.is_reversed is True
         assert kernel.is_input is False

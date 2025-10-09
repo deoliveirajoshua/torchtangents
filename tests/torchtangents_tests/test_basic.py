@@ -96,8 +96,25 @@ class TestKernel:
         """Test kernel creation and methods."""
         nngp = torch.randn(5, 5)
         ntk = torch.randn(5, 5)
+        cov1 = torch.randn(5, 5)
+        x1_is_x2 = torch.tensor(True)
         
-        kernel = tt.Kernel(nngp=nngp, ntk=ntk)
+        kernel = tt.Kernel(
+            nngp=nngp, 
+            ntk=ntk,
+            cov1=cov1,
+            cov2=None,
+            x1_is_x2=x1_is_x2,
+            is_gaussian=True,
+            is_reversed=False,
+            is_input=False,
+            diagonal_batch=True,
+            diagonal_spatial=False,
+            shape1=(5, 5),
+            shape2=(5, 5),
+            batch_axis=0,
+            channel_axis=1
+        )
         
         assert kernel.nngp is nngp
         assert kernel.ntk is ntk

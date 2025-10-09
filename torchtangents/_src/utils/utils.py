@@ -464,7 +464,7 @@ def reverse_zipped(
                         for j in (i, i + 1))
 
     if isinstance(x, torch.Tensor):
-      target_axes = range(start_axis, ndim)
+      target_axes = tuple(range(start_axis, ndim))
       x = torch.moveaxis(x, source_axes, target_axes)
     else:
       x = x[:start_axis] + type(x)(x[i] for i in source_axes)

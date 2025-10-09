@@ -164,8 +164,23 @@ class TestDenseLayer:
         
         # Test NNGP computation
         base_nngp_same = torch.matmul(x1_flat, x1_flat.T) / x1_flat.shape[1]
-        base_kernel_same = Kernel(nngp=base_nngp_same, cov1=base_nngp_same, 
-                                 cov2=base_nngp_same, ntk=base_nngp_same)
+        x1_is_x2 = torch.tensor(True)
+        base_kernel_same = Kernel(
+            nngp=base_nngp_same, 
+            cov1=base_nngp_same,
+            cov2=base_nngp_same, 
+            ntk=base_nngp_same,
+            x1_is_x2=x1_is_x2,
+            is_gaussian=True,
+            is_reversed=False,
+            is_input=True,
+            diagonal_batch=True,
+            diagonal_spatial=False,
+            shape1=(5, 3),
+            shape2=(5, 3),
+            batch_axis=0,
+            channel_axis=1
+        )
         
         kernel_same = kernel_fn(base_kernel_same)
         assert isinstance(kernel_same, Kernel)
@@ -173,16 +188,44 @@ class TestDenseLayer:
         
         # Test cross-kernel
         base_nngp_cross = torch.matmul(x1_flat, x2_flat.T) / x1_flat.shape[1]
-        base_kernel_cross = Kernel(nngp=base_nngp_cross, cov1=base_nngp_same,
-                                  cov2=torch.matmul(x2_flat, x2_flat.T) / x2_flat.shape[1],
-                                  ntk=base_nngp_cross)
+        x1_is_x2_cross = torch.tensor(False)
+        base_kernel_cross = Kernel(
+            nngp=base_nngp_cross, 
+            cov1=base_nngp_same,
+            cov2=torch.matmul(x2_flat, x2_flat.T) / x2_flat.shape[1],
+            ntk=base_nngp_cross,
+            x1_is_x2=x1_is_x2_cross,
+            is_gaussian=True,
+            is_reversed=False,
+            is_input=True,
+            diagonal_batch=True,
+            diagonal_spatial=False,
+            shape1=(5, 3),
+            shape2=(4, 3),
+            batch_axis=0,
+            channel_axis=1
+        )
         
         kernel_cross = kernel_fn(base_kernel_cross)
         assert kernel_cross.nngp.shape == (5, 4)
         
         # Test NTK computation - create kernel with NTK component
-        base_kernel_ntk = Kernel(nngp=base_nngp_same, cov1=base_nngp_same,
-                                cov2=base_nngp_same, ntk=base_nngp_same)
+        base_kernel_ntk = Kernel(
+            nngp=base_nngp_same, 
+            cov1=base_nngp_same,
+            cov2=base_nngp_same, 
+            ntk=base_nngp_same,
+            x1_is_x2=x1_is_x2,
+            is_gaussian=True,
+            is_reversed=False,
+            is_input=True,
+            diagonal_batch=True,
+            diagonal_spatial=False,
+            shape1=(5, 3),
+            shape2=(5, 3),
+            batch_axis=0,
+            channel_axis=1
+        )
         kernel_ntk = kernel_fn(base_kernel_ntk)
         assert kernel_ntk.ntk is not None
         assert kernel_ntk.ntk.shape == (5, 5)
@@ -261,8 +304,23 @@ class TestIdentityLayer:
         
         # Create base kernel - for Identity, this should be preserved exactly
         base_nngp = torch.matmul(x1, x2.T)
-        base_kernel = Kernel(nngp=base_nngp, cov1=torch.matmul(x1, x1.T),
-                            cov2=torch.matmul(x2, x2.T), ntk=base_nngp)
+        x1_is_x2 = torch.tensor(False)
+        base_kernel = Kernel(
+            nngp=base_nngp, 
+            cov1=torch.matmul(x1, x1.T),
+            cov2=torch.matmul(x2, x2.T), 
+            ntk=base_nngp,
+            x1_is_x2=x1_is_x2,
+            is_gaussian=True,
+            is_reversed=False,
+            is_input=True,
+            diagonal_batch=True,
+            diagonal_spatial=False,
+            shape1=(4, 6),
+            shape2=(3, 6),
+            batch_axis=0,
+            channel_axis=1
+        )
         
         # Identity should preserve kernel structure exactly
         kernel = kernel_fn(base_kernel)
@@ -346,8 +404,23 @@ class TestFlattenLayer:
         x2_flat = x2.view(5, -1)
         nngp_input = torch.matmul(x1_flat, x2_flat.T)  # (3, 5)
         ntk_input = torch.matmul(x1_flat, x2_flat.T)   # (3, 5)
-        
-        kernel_obj = Kernel(nngp=nngp_input, ntk=ntk_input)
+
+        kernel_obj = Kernel(
+            nngp=nngp_input, 
+            ntk=ntk_input,
+            cov1=torch.matmul(x1_flat, x1_flat.T),
+            cov2=torch.matmul(x2_flat, x2_flat.T),
+            x1_is_x2=torch.tensor(False),
+            is_gaussian=True,
+            is_reversed=False,
+            is_input=True,
+            diagonal_batch=True,
+            diagonal_spatial=False,
+            shape1=(3, 2, 4),
+            shape2=(5, 2, 4),
+            batch_axis=0,
+            channel_axis=1
+        )
         kernel = kernel_fn(kernel_obj)
         assert isinstance(kernel, Kernel)
         
@@ -430,8 +503,23 @@ class TestDropoutLayer:
         # Create proper cross-correlation matrices
         nngp_input = torch.matmul(x1, x2.T)  # (4, 3)
         ntk_input = torch.matmul(x1, x2.T)   # (4, 3)
-        
-        kernel_obj = Kernel(nngp=nngp_input, ntk=ntk_input)
+
+        kernel_obj = Kernel(
+            nngp=nngp_input, 
+            ntk=ntk_input,
+            cov1=torch.matmul(x1, x1.T),
+            cov2=torch.matmul(x2, x2.T),
+            x1_is_x2=torch.tensor(False),
+            is_gaussian=True,
+            is_reversed=False,
+            is_input=False,
+            diagonal_batch=True,
+            diagonal_spatial=False,
+            shape1=(4, 6),
+            shape2=(3, 6),
+            batch_axis=0,
+            channel_axis=1
+        )
         kernel = kernel_fn(kernel_obj)
         assert isinstance(kernel, Kernel)
         
@@ -535,9 +623,24 @@ class TestLinearLayerIntegration:
         # Create proper cross-correlation matrices
         nngp_input = torch.matmul(x1, x2.T)  # (3, 5)
         ntk_input = torch.matmul(x1, x2.T)   # (3, 5)
-        
+
         # Test NNGP computation
-        kernel_obj = Kernel(nngp=nngp_input, ntk=ntk_input)
+        kernel_obj = Kernel(
+            nngp=nngp_input, 
+            ntk=ntk_input,
+            cov1=torch.matmul(x1, x1.T),
+            cov2=torch.matmul(x2, x2.T),
+            x1_is_x2=torch.tensor(False),
+            is_gaussian=True,
+            is_reversed=False,
+            is_input=True,
+            diagonal_batch=True,
+            diagonal_spatial=False,
+            shape1=(3, 4),
+            shape2=(5, 4),
+            batch_axis=0,
+            channel_axis=1
+        )
         kernel = kernel_fn(kernel_obj)
         assert isinstance(kernel, Kernel)
         assert kernel.nngp.shape == (3, 5)
@@ -545,8 +648,23 @@ class TestLinearLayerIntegration:
         # Test NTK computation with same input
         nngp_self = torch.matmul(x1, x1.T)  # (3, 3)
         ntk_self = torch.matmul(x1, x1.T)   # (3, 3)
-        
-        kernel_obj_ntk = Kernel(nngp=nngp_self, ntk=ntk_self)
+
+        kernel_obj_ntk = Kernel(
+            nngp=nngp_self, 
+            ntk=ntk_self,
+            cov1=nngp_self,
+            cov2=None,
+            x1_is_x2=torch.tensor(True),
+            is_gaussian=True,
+            is_reversed=False,
+            is_input=True,
+            diagonal_batch=True,
+            diagonal_spatial=False,
+            shape1=(3, 4),
+            shape2=(3, 4),
+            batch_axis=0,
+            channel_axis=1
+        )
         kernel_ntk = kernel_fn(kernel_obj_ntk)
         assert kernel_ntk.ntk is not None
         assert kernel_ntk.ntk.shape == (3, 3)

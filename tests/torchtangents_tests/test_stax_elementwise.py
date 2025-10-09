@@ -82,7 +82,22 @@ class TestReluActivation:
         x2 = torch.randn(5, 3)
         
         # Create input kernel (like from previous layer)
-        input_kernel = Kernel(nngp=torch.matmul(x1, x2.T))
+        input_kernel = Kernel(
+            nngp=torch.matmul(x1, x2.T),
+            ntk=None,
+            cov1=torch.matmul(x1, x1.T),
+            cov2=torch.matmul(x2, x2.T),
+            x1_is_x2=torch.tensor(False),
+            is_gaussian=True,
+            is_reversed=False,
+            is_input=True,
+            diagonal_batch=True,
+            diagonal_spatial=False,
+            shape1=(4, 3),
+            shape2=(5, 3),
+            batch_axis=0,
+            channel_axis=1
+        )
         
         # Apply Relu kernel transformation
         kernel = kernel_fn(input_kernel)
@@ -347,7 +362,22 @@ class TestSinActivation:
         x2 = torch.randn(5, 4)
         
         # Create input kernel
-        input_kernel = Kernel(nngp=torch.matmul(x1, x2.T))
+        input_kernel = Kernel(
+            nngp=torch.matmul(x1, x2.T),
+            ntk=None,
+            cov1=torch.matmul(x1, x1.T),
+            cov2=torch.matmul(x2, x2.T),
+            x1_is_x2=torch.tensor(False),
+            is_gaussian=True,
+            is_reversed=False,
+            is_input=True,
+            diagonal_batch=True,
+            diagonal_spatial=False,
+            shape1=(3, 4),
+            shape2=(5, 4),
+            batch_axis=0,
+            channel_axis=1
+        )
         
         # Apply Sin kernel transformation
         kernel = kernel_fn(input_kernel)
@@ -492,7 +522,22 @@ class TestActivationKernels:
         
         x1 = torch.randn(4, 5)
         x2 = torch.randn(3, 5)
-        input_kernel = Kernel(nngp=torch.matmul(x1, x2.T))
+        input_kernel = Kernel(
+            nngp=torch.matmul(x1, x2.T),
+            ntk=None,
+            cov1=torch.matmul(x1, x1.T),
+            cov2=torch.matmul(x2, x2.T),
+            x1_is_x2=torch.tensor(False),
+            is_gaussian=True,
+            is_reversed=False,
+            is_input=True,
+            diagonal_batch=True,
+            diagonal_spatial=False,
+            shape1=(4, 5),
+            shape2=(3, 5),
+            batch_axis=0,
+            channel_axis=1
+        )
         
         for init_fn, apply_fn, kernel_fn in activations:
             kernel = kernel_fn(input_kernel)
@@ -517,14 +562,16 @@ class TestActivationKernels:
             ntk=nngp.clone(),
             cov1=cov1,
             cov2=cov1.clone(),
-            x1_is_x2=True,
+            x1_is_x2=torch.tensor(True),
             is_gaussian=False,
             is_reversed=False,
             is_input=True,
             diagonal_batch=True,
             diagonal_spatial=True,
             shape1=(5, 4),
-            shape2=(5, 4)
+            shape2=(5, 4),
+            batch_axis=0,
+            channel_axis=1
         )
         
         for init_fn, apply_fn, kernel_fn in activations:
@@ -546,7 +593,22 @@ class TestActivationKernels:
         for scale in [0.1, 1.0, 10.0, 100.0]:
             x1 = torch.randn(3, 4) * scale
             x2 = torch.randn(5, 4) * scale
-            input_kernel = Kernel(nngp=torch.matmul(x1, x2.T))
+            input_kernel = Kernel(
+                nngp=torch.matmul(x1, x2.T),
+                ntk=None,
+                cov1=torch.matmul(x1, x1.T),
+                cov2=torch.matmul(x2, x2.T),
+                x1_is_x2=torch.tensor(False),
+                is_gaussian=True,
+                is_reversed=False,
+                is_input=True,
+                diagonal_batch=True,
+                diagonal_spatial=False,
+                shape1=(3, 4),
+                shape2=(5, 4),
+                batch_axis=0,
+                channel_axis=1
+            )
             
             for init_fn, apply_fn, kernel_fn in activations:
                 kernel = kernel_fn(input_kernel)
