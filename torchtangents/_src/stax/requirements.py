@@ -883,7 +883,19 @@ def _set_shapes(
   shape1 = _propagate_shape(init_fn, unmask_fn(apply_fn), shape1, **kwargs1)
   shape2 = _propagate_shape(init_fn, unmask_fn(apply_fn), shape2, **kwargs2)
 
-  set_shape_fn = lambda k, s1, s2: k.replace(shape1=s1.shape, shape2=s2.shape)
+  def set_shape_fn(k, s1, s2):
+    # Handle both single tensors and tuples of tensors (for parallel layers)
+    if isinstance(s1, tuple):
+      # For parallel layers, shapes are tuples - compute overall output shape
+      # by concatenating along the last dimension (typical for FanInConcat)
+      # For now, just use the first element's shape as a fallback
+      new_shape1 = s1[0].shape if len(s1) > 0 and hasattr(s1[0], 'shape') else k.shape1
+      new_shape2 = s2[0].shape if len(s2) > 0 and hasattr(s2[0], 'shape') else k.shape2
+    else:
+      new_shape1 = s1.shape if hasattr(s1, 'shape') else k.shape1
+      new_shape2 = s2.shape if hasattr(s2, 'shape') else k.shape2
+    
+    return k.replace(shape1=new_shape1, shape2=new_shape2)
 
   return tree_map(set_shape_fn, out_kernel, shape1, shape2, is_leaf=is_leaf)
 

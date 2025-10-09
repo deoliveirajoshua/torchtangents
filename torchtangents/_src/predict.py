@@ -64,6 +64,15 @@ def _solve_kernel_regression(k_train_train: torch.Tensor,
                            y_train: torch.Tensor,
                            diag_reg: float = 0.) -> torch.Tensor:
     """Solve kernel regression: return (K + reg*I)^(-1) @ y."""
+    # Handle scalar kernel (edge case)
+    if k_train_train.ndim == 0:
+        # For a scalar kernel K, solution is y/K (or y/(K+reg))
+        k_val = k_train_train.item() + diag_reg
+        if abs(k_val) < 1e-10:
+            # Ill-conditioned, return zeros
+            return torch.zeros_like(y_train)
+        return y_train / k_val
+    
     n = k_train_train.shape[0]
     
     # Add diagonal regularization
