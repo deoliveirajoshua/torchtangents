@@ -1,0 +1,269 @@
+Metadata-Version: 2.1
+Name: torchtangents
+Version: 0.1.0
+Summary: PyTorch implementation of Neural Tangents for computing empirical and infinite-width NTKs
+Home-page: https://github.com/yourusername/torchtangents
+Author: TorchTangents Contributors
+Author-email: torchtangents@example.com
+License: Apache 2.0
+Project-URL: Bug Reports, https://github.com/yourusername/torchtangents/issues
+Project-URL: Source, https://github.com/yourusername/torchtangents
+Project-URL: Documentation, https://github.com/yourusername/torchtangents#readme
+Keywords: neural networks,neural tangent kernel,pytorch,machine learning,deep learning,infinite width
+Classifier: Development Status :: 3 - Alpha
+Classifier: Intended Audience :: Developers
+Classifier: Intended Audience :: Science/Research
+Classifier: License :: OSI Approved :: Apache Software License
+Classifier: Operating System :: OS Independent
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.8
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Topic :: Scientific/Engineering
+Classifier: Topic :: Scientific/Engineering :: Artificial Intelligence
+Classifier: Topic :: Scientific/Engineering :: Mathematics
+Classifier: Topic :: Software Development :: Libraries
+Classifier: Topic :: Software Development :: Libraries :: Python Modules
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+Provides-Extra: all
+Provides-Extra: benchmarks
+Provides-Extra: comparison
+Provides-Extra: dev
+Provides-Extra: examples
+Provides-Extra: testing
+License-File: LICENSE
+License-File: LICENSE_SHORT
+
+# torchtangents
+
+_**Infinite-width neural networks and NTKs, now natively in PyTorch.**_  
+`torchtangents` is a faithful fork and PyTorch re-implementation of **Neural Tangents**—the seminal JAX library for infinite-width neural networks (NNGP/NTK). In addition to parity with the original API, `torchtangents` introduces **lifting**: turn any initialized `torch.nn.Sequential` into its **infinite-width** counterpart for exact GP inference (NNGP) or NTK gradient-flow predictions—without rewriting your model. Motivations include the dominance of the PyTorch ecosystem and the fact that the original Neural Tangents repository is now archived (read-only) as of **May 6, 2025**.
+
+> Neural Tangents (ICLR 2020) provided the first broadly usable toolkit to define, train, and evaluate infinite networks; `torchtangents` brings those capabilities to PyTorch users, while preserving the original library’s Apache-2.0 licensing.
+
+---
+
+## Features
+
+- **NNGP & NTK in PyTorch.** Compute exact NNGP and NTK kernels for common layers (Dense/Conv, pooling, residual connections, activations) and compose them to match your model topology. (Design mirrors Neural Tangents.)  
+- **Lifting of `nn.Sequential`.** Given an initialized finite-width PyTorch model, `lift(model, …)` produces an infinite-width kernel function aligned with your initialization, enabling GP inference (NNGP) or NTK predictions on the same architecture.  
+- **Analytic training dynamics (NTK).** Closed-form predictions under gradient flow in function space for squared loss, per the NTK theory of Jacot et al. (2018).  
+- **API parity & drop-in ergonomics.** A thin, idiomatic PyTorch surface while keeping the conceptual shape of Neural Tangents’ `stax`/`kernel_fn` design.  
+- **Apache-2.0** license (matching the original).
+
+---
+
+## Installation
+
+```bash
+pip install torchtangents        # from PyPI (preferred)
+# or
+pip install git+https://github.com/deoliveirajoshua/torchtangents.git
+```
+
+**Requirements.** Python ≥ 3.9, PyTorch ≥ 2.2.
+
+---
+
+## Quick start
+
+### 1) Compute NNGP/NTK for a PyTorch model (functional API)
+
+```python
+import torch
+import torchtangents as tt
+from torchtangents.nn import Serial, Dense, Relu
+
+# Define an infinite-width architecture (Dense/ReLU/Dense)
+init, apply, kernel_fn = Serial(
+    Dense(512), Relu(),
+    Dense(512), Relu(),
+    Dense(10)
+)
+
+x1 = torch.randn(128, 784)  # train inputs
+x2 = torch.randn(64,  784)  # test inputs
+
+K = kernel_fn(x1, x2, which=("nngp", "ntk"))
+K_nngp, K_ntk = K.nngp, K.ntk
+```
+
+### 2) **Lift** an existing `nn.Sequential` to infinity
+
+```python
+import torch, torch.nn as nn
+import torchtangents as tt
+
+model = nn.Sequential(
+    nn.Linear(784, 4096), nn.ReLU(),
+    nn.Linear(4096, 4096), nn.ReLU(),
+    nn.Linear(4096, 10)
+)
+# model is already initialized (user's preferred init)
+kernel_fn = tt.lift(model, kind="both")   # "nngp", "ntk", or "both"
+
+x_train = torch.randn(2000, 784);  y_train = torch.randn(2000, 10)
+x_test  = torch.randn(200,  784)
+
+K_train = kernel_fn(x_train, x_train, which="nngp")
+K_cross = kernel_fn(x_test,  x_train, which="nngp")
+
+# Ridge/GP closed form
+reg = 1e-6
+alpha = torch.linalg.solve(K_train + reg*torch.eye(len(x_train)), y_train)
+y_pred = K_cross @ alpha
+```
+
+**What lifting does.** It reads your module graph and initialization statistics (weight/bias variances, fan-in scaling) and constructs the **exact infinite-width kernel** induced by your architecture and nonlinearity, matching the NNGP/NTK recursions in the literature. For FC networks, the recursion from Lee et al. (2018, Sec. 2.3, Eqs. (4)–(6)) is used; convolutions follow standard kernel lifting with spatial averaging.
+
+---
+
+## Theory at a glance
+
+### Infinite-width GP prior (NNGP)
+
+For a deep network with i.i.d. Gaussian parameters at initialization, the pre-activations converge (layer-wise) to a **Gaussian process** with covariance determined by a **recursion**:
+
+```math
+K^{(\ell)}(x,x^\prime)=\sigma_b^2+\sigma_w^2 \mathbb{E}_{(u,v)\sim \mathcal{N}(0,\Sigma^{(\ell-1)})}[\phi(u)\phi(v)]
+```
+where $`\Sigma^{(\ell-1)}`$ has entries $`K^{(\ell-1)}(x,x)`$, $`K^{(\ell-1)}(x^\prime,x^\prime)`$, and $`K^{(\ell-1)}(x,x^\prime)`$.  
+(See Lee et al., **ICLR 2018**, Sec. 2.3, Eqs. (4)–(6).)
+
+### NTK training dynamics (gradient flow)
+
+For squared loss and infinitesimal step size, in the infinite-width limit the network function evolves via **kernel gradient flow**:
+
+```math
+\partial_t f_t(x) = - \int K_{\text{NTK}}(x,x')\big(f_t(x')-y(x')\big)\,d\mu(x').
+```
+
+On a finite dataset this is $`\dot{\mathbf{f}}_t = -\mathbf{K}_{\text{NTK}}(\mathbf{f}_t-\mathbf{y})`$, yielding exponential convergence along the kernel eigenmodes.  
+(See Jacot et al., **NeurIPS 2018**, Sec. 4; also discussion around lines 519–533.)
+
+> Background and library context: Novak et al., **“Fast and Easy Infinite Neural Networks in Python”** (ICLR 2020) introduced the Neural Tangents software that `torchtangents` ports to PyTorch.
+
+---
+
+## The **lifting** API
+
+```python
+import torchtangents as tt
+
+kernel_fn = tt.lift(
+    model,                        # nn.Sequential
+    kind="both",                  # "nngp" | "ntk" | "both"
+    parameterization="ntk",       # "ntk" (default) | "mup"
+    assume_iid_inputs=True,       # batched-i.i.d. inputs for kernel block-diagonality
+)
+```
+
+- **`parameterization`** controls scaling rules used in the infinite-width limit.  
+  - `"ntk"` yields the classical NTK parameterization underpinning Jacot et al. (2018).  
+  - `"mup"` (optional) follows the **μ-Parametrization** (Tensor Programs V) for width-stable hyperparameters; useful when matching finite-width training under μP.
+
+**Supported PyTorch layers (initial release).** `nn.Linear`, `nn.Conv1d/2d` (valid/same), `nn.AvgPool*`, residual blocks via `tt.nn.Skip`, common activations (`ReLU`, `Tanh`, `GELU`, `Erf`).  
+_Notes._ BatchNorm in the strict infinite-width limit is subtle; we currently recommend inference-mode or removing affine parameters for compatibility. (Advanced BN support is on the roadmap; see Neural Tangents docs for prior art.)
+
+---
+
+## Examples
+
+### Exact GP regression with NNGP
+
+```python
+from torchtangents.gp import gp_predict
+
+K_train = kernel_fn(x_train, x_train, which="nngp")
+K_test  = kernel_fn(x_test,  x_train, which="nngp")
+pred_mean, pred_cov = gp_predict(K_train, y_train, K_test, noise=1e-2)
+```
+
+### NTK (function-space) training dynamics
+
+```python
+from torchtangents.nt import gradient_flow
+
+sol = gradient_flow(K_ntk=kernel_fn(x_train, x_train, which="ntk"),
+                    y=y_train, t_final=5.0)   # returns f_t on the grid of times
+y_pred = kernel_fn(x_test, x_train, which="ntk") @ sol.at_final()
+```
+
+---
+
+## Relationship to Neural Tangents
+
+- **Scope.** `torchtangents` aims for **feature parity** with the original (e.g., dense/conv/residual stacks, automatic NNGP/NTK composition) while embracing PyTorch tensors, autograd, and `torch.compile`.  
+- **Status of upstream.** The original `google/neural-tangents` repo is **archived** (read-only) as of **May 6, 2025**; this fork ensures continued evolution in the PyTorch ecosystem.  
+- **License.** Apache-2.0, consistent with upstream.
+
+---
+
+## References (theory & software)
+
+- **Neural Tangent Kernel (NTK).** Jacot, Gabriel, Hongler, _NeurIPS 2018_. See **Sec. 4** for the NTK and kernel gradient flow, and the “Training” discussion (lines 519–533) on constancy of the NTK at infinite width.  
+  Paper: https://proceedings.neurips.cc/paper/8076-neural-tangen-kernel-convergence-and-generalization-in-neural-networks.pdf  
+- **Deep NNs as GPs (NNGP).** Lee et al., _ICLR 2018_, **Sec. 2.3, Eqs. (4)–(6)** for the covariance recursion.  
+  Paper: https://openreview.net/pdf?id=B1EA-M-0Z  
+- **Neural Tangents library.** Novak et al., _ICLR 2020_. Software paper describing the design/API; complements the theoretical works.  
+  Paper: https://arxiv.org/abs/1912.02803  
+- **μ-Parametrization (Tensor Programs V).** Yang et al., _NeurIPS 2021_: **μTransfer** for width-stable hyperparameters; relevant when choosing `parameterization="mup"`.  
+  Paper: https://proceedings.neurips.cc/paper/2021/hash/8df7c2e3c3c3be098ef7b382bd2c37ba-Abstract.html
+
+_For surveys and extensions (e.g., beyond infinite-width), see Golikov (2022) and follow-ups._
+
+---
+
+## FAQ
+
+**Q: What is the difference between NNGP and NTK predictions?**  
+- **NNGP** corresponds to a Bayesian prior over functions at initialization; predictions are posterior means/variances from GP regression/classification.  
+- **NTK** corresponds to the function-space limit of gradient descent training and yields deterministic predictions governed by kernel gradient flow. See Jacot et al. (Sec. 4) and Lee et al. (Sec. 2.4).
+
+**Q: Do I need to re-implement my model?**  
+No. Use **lifting** on your existing `nn.Sequential`. For more complex graphs (e.g., attention, non-sequential branches), use the functional kernel API directly; attention kernels follow prior work (e.g., Hron et al., ICML 2020).
+
+**Q: How close are finite-width networks to their infinite limits?**  
+Empirically, wide networks often match NNGP/NTK predictions; deviations arise from feature learning beyond the “lazy” regime and from normalization layers. (See the Neural Tangents notebooks and literature.)
+
+---
+
+## Contributing
+
+Contributions are welcome! Please open issues/PRs with:  
+- New kernels (layers/activations) and architecture transforms.  
+- Performance improvements (vectorization, CUDA kernels, `torch.compile`).  
+- Tests and parity checks against Neural Tangents examples.
+
+---
+
+## Citation
+
+If you use `torchtangents` in academic work, please cite:
+
+```bibtex
+@software{torchtangents2025,
+  title        = {torchtangents: Infinite-width neural networks and NTKs in PyTorch},
+  author       = {Joshua DeOliveira},
+  year         = {2025},
+  url          = {https://github.com/deoliveirajoshua/torchtangents},
+  note         = {Fork of Neural Tangents (archived May 6, 2025)}
+}
+```
+
+And cite the foundational works you rely on (NTK/NNGP/library) as listed above.
+
+---
+
+### License
+
+`torchtangents` is released under the **Apache-2.0** License, consistent with the original Neural Tangents repository.
+
+---
+
+**Acknowledgments.** This project stands on the shoulders of Neural Tangents and the NTK/NNGP literature — thanks to the original authors and community.
+
+**Neural Tangents (https://github.com/google/neural-tangents)** and documentation remain invaluable references for behavior, design, and examples.
+
