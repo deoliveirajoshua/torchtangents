@@ -38,7 +38,7 @@ def FanOut(num_outputs: int) -> InternalLayer:
     
     def apply_fn(params: PyTree,
                 inputs: torch.Tensor,
-                rng: Optional[torch.Generator] = None) -> List[torch.Tensor]:
+                rng: Optional[torch.Generator] = None, **kwargs) -> List[torch.Tensor]:
         """Fan out the input to multiple identical outputs."""
         return [inputs] * num_outputs
     
@@ -72,7 +72,7 @@ def FanInSum(*ignore_axis: int) -> InternalLayer:
     
     def apply_fn(params: PyTree,
                 inputs: List[torch.Tensor],
-                rng: Optional[torch.Generator] = None) -> torch.Tensor:
+                rng: Optional[torch.Generator] = None, **kwargs) -> torch.Tensor:
         """Sum multiple inputs."""
         if len(inputs) == 1:
             return inputs[0]
@@ -145,7 +145,7 @@ def FanInProd(*ignore_axis: int) -> InternalLayer:
     
     def apply_fn(params: PyTree,
                 inputs: List[torch.Tensor],
-                rng: Optional[torch.Generator] = None) -> torch.Tensor:
+                rng: Optional[torch.Generator] = None, **kwargs) -> torch.Tensor:
         """Take element-wise product of multiple inputs."""
         if len(inputs) == 1:
             return inputs[0]
@@ -236,7 +236,7 @@ def FanInConcat(axis: int = -1) -> InternalLayer:
     
     def apply_fn(params: PyTree,
                 inputs: List[torch.Tensor],
-                rng: Optional[torch.Generator] = None) -> torch.Tensor:
+                rng: Optional[torch.Generator] = None, **kwargs) -> torch.Tensor:
         """Concatenate multiple inputs along specified axis."""
         if len(inputs) == 1:
             return inputs[0]

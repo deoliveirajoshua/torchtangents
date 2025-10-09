@@ -125,10 +125,10 @@ def nt_tree_fn(
 
 def all_none(x, attr: Optional[str] = None) -> bool:
   get_fn = (lambda x: x) if attr is None else lambda x: getattr(x, attr)
-  return tree_all(tree_map(lambda x: get_fn(x) is None, x))
+  return tree_all(lambda x: x, tree_map(lambda x: get_fn(x) is None, x))
 
 
-def canonicalize_get(get):
+def _canonicalize_get_for_decorator(get):
   if get is None:
     return True, get
 
@@ -200,17 +200,17 @@ def get_namedtuple(name):
       canonicalized_args = list(args)
 
       if 'get' in kwargs:
-        get_is_not_tuple, get = canonicalize_get(kwargs['get'])
+        get_is_not_tuple, get = _canonicalize_get_for_decorator(kwargs['get'])
         kwargs['get'] = get
       elif get_index < len(args):
-        get_is_not_tuple, get = canonicalize_get(args[get_index])
+        get_is_not_tuple, get = _canonicalize_get_for_decorator(args[get_index])
         canonicalized_args[get_index] = get
       elif defaults is None:
         raise ValueError(
             '`get_namedtuple` function must have a `get` argument provided or '
             'set by default.')
       else:
-        get_is_not_tuple, get = canonicalize_get(defaults[get_index -
+        get_is_not_tuple, get = _canonicalize_get_for_decorator(defaults[get_index -
                                                           len(args)])
 
       fn_out = fn(*canonicalized_args, **kwargs)

@@ -129,7 +129,7 @@ def Dense(out_dim: int,
     
     def apply_fn(params: PyTree, 
                 inputs: torch.Tensor, 
-                rng: Optional[torch.Generator] = None) -> torch.Tensor:
+                rng: Optional[torch.Generator] = None, **kwargs) -> torch.Tensor:
         """Apply Dense layer."""
         W, b = params['weight'], params['bias']
         
@@ -209,7 +209,7 @@ def Identity() -> InternalLayer:
     
     def apply_fn(params: PyTree, 
                 inputs: torch.Tensor, 
-                rng: Optional[torch.Generator] = None) -> torch.Tensor:
+                rng: Optional[torch.Generator] = None, **kwargs) -> torch.Tensor:
         return inputs
     
     def kernel_fn(kernel: Kernel) -> Kernel:
@@ -237,7 +237,7 @@ def Flatten() -> InternalLayer:
     
     def apply_fn(params: PyTree,
                 inputs: torch.Tensor,
-                rng: Optional[torch.Generator] = None) -> torch.Tensor:
+                rng: Optional[torch.Generator] = None, **kwargs) -> torch.Tensor:
         batch_size = inputs.shape[0]
         return inputs.view(batch_size, -1)
     
@@ -287,7 +287,7 @@ def Dropout(rate: float,
     
     def apply_fn(params: PyTree,
                 inputs: torch.Tensor,
-                rng: Optional[torch.Generator] = None) -> torch.Tensor:
+                rng: Optional[torch.Generator] = None, **kwargs) -> torch.Tensor:
         if mode in ['test', 'predict'] or rate == 0.0:
             return inputs
         return F.dropout(inputs, p=rate, training=True)
@@ -346,7 +346,7 @@ def Index(index) -> InternalLayer:
     
     def apply_fn(params: PyTree,
                 inputs: torch.Tensor,
-                rng: Optional[torch.Generator] = None) -> torch.Tensor:
+                rng: Optional[torch.Generator] = None, **kwargs) -> torch.Tensor:
         """Apply indexing to inputs."""
         return inputs[index]
     
@@ -466,7 +466,7 @@ def Conv(out_channels: int,
     
     def apply_fn(params: PyTree,
                 inputs: torch.Tensor,
-                rng: Optional[torch.Generator] = None) -> torch.Tensor:
+                rng: Optional[torch.Generator] = None, **kwargs) -> torch.Tensor:
         """Apply convolution."""
         W, b = params['weight'], params['bias']
         
@@ -580,7 +580,7 @@ def ConvTranspose(out_channels: int,
     
     def apply_fn(params: PyTree,
                 inputs: torch.Tensor,
-                rng: Optional[torch.Generator] = None) -> torch.Tensor:
+                rng: Optional[torch.Generator] = None, **kwargs) -> torch.Tensor:
         """Apply transpose convolution."""
         W, b = params['W'], params['b']
         
@@ -632,7 +632,7 @@ def AvgPool(window_shape: Tuple[int, ...],
     
     def apply_fn(params: PyTree,
                 inputs: torch.Tensor,
-                rng: Optional[torch.Generator] = None) -> torch.Tensor:
+                rng: Optional[torch.Generator] = None, **kwargs) -> torch.Tensor:
         """Apply average pooling."""
         if len(window_shape) == 1:
             return F.avg_pool1d(inputs, kernel_size=window_shape[0], stride=strides[0], padding=0)
@@ -674,7 +674,7 @@ def SumPool(window_shape: Tuple[int, ...],
     
     def apply_fn(params: PyTree,
                 inputs: torch.Tensor,
-                rng: Optional[torch.Generator] = None) -> torch.Tensor:
+                rng: Optional[torch.Generator] = None, **kwargs) -> torch.Tensor:
         """Apply sum pooling."""
         # Sum pooling = avg pooling * window_size
         window_size = torch.tensor(window_shape).prod().item()
@@ -718,7 +718,7 @@ def GlobalAvgPool() -> InternalLayer:
     
     def apply_fn(params: PyTree,
                 inputs: torch.Tensor,
-                rng: Optional[torch.Generator] = None) -> torch.Tensor:
+                rng: Optional[torch.Generator] = None, **kwargs) -> torch.Tensor:
         """Apply global average pooling."""
         # Average over spatial dimensions (all except batch and channel)
         # Input: (batch, height, width, ..., channels)
@@ -746,7 +746,7 @@ def GlobalSumPool() -> InternalLayer:
     
     def apply_fn(params: PyTree,
                 inputs: torch.Tensor,
-                rng: Optional[torch.Generator] = None) -> torch.Tensor:
+                rng: Optional[torch.Generator] = None, **kwargs) -> torch.Tensor:
         """Apply global sum pooling."""
         # Sum over spatial dimensions, keep batch and channel dimensions
         spatial_dims = list(range(2, inputs.ndim))  # Skip batch and channel
@@ -798,7 +798,7 @@ def DotGeneral(dimension_numbers, precision=None) -> InternalLayer:
     
     def apply_fn(params: PyTree,
                 inputs: Tuple[torch.Tensor, torch.Tensor],
-                rng: Optional[torch.Generator] = None) -> torch.Tensor:
+                rng: Optional[torch.Generator] = None, **kwargs) -> torch.Tensor:
         """Apply general dot product."""
         lhs, rhs = inputs
         # Simplified implementation - would need proper dimension handling
@@ -843,7 +843,7 @@ def Aggregate(
     def apply_fn(params: PyTree,
                 inputs: torch.Tensor,
                 pattern: Optional[torch.Tensor] = None,
-                rng: Optional[torch.Generator] = None) -> torch.Tensor:
+                rng: Optional[torch.Generator] = None, **kwargs) -> torch.Tensor:
         """Apply aggregation."""
         if pattern is None:
             return inputs
@@ -937,7 +937,7 @@ def ConvLocal(
     
     def apply_fn(params: PyTree,
                 inputs: torch.Tensor,
-                rng: Optional[torch.Generator] = None) -> torch.Tensor:
+                rng: Optional[torch.Generator] = None, **kwargs) -> torch.Tensor:
         """Apply locally connected layer."""
         W, b = params['W'], params['b']
         
@@ -1054,7 +1054,7 @@ def GlobalSelfAttention(
     
     def apply_fn(params: PyTree,
                 inputs: torch.Tensor,
-                rng: Optional[torch.Generator] = None) -> torch.Tensor:
+                rng: Optional[torch.Generator] = None, **kwargs) -> torch.Tensor:
         """Apply self-attention."""
         query_matrices = params['query_matrices']
         key_matrices = params['key_matrices'] 
@@ -1174,7 +1174,7 @@ def ImageResize(
     
     def apply_fn(params: PyTree,
                 inputs: torch.Tensor,
-                rng: Optional[torch.Generator] = None) -> torch.Tensor:
+                rng: Optional[torch.Generator] = None, **kwargs) -> torch.Tensor:
         """Apply image resizing."""
         output_shape = _get_output_shape(inputs.shape)
         
@@ -1250,7 +1250,7 @@ def LayerNorm(
     
     def apply_fn(params: PyTree,
                 inputs: torch.Tensor,
-                rng: Optional[torch.Generator] = None) -> torch.Tensor:
+                rng: Optional[torch.Generator] = None, **kwargs) -> torch.Tensor:
         """Apply layer normalization."""
         # Normalize over specified dimensions
         if isinstance(axis, int):

@@ -1,2 +1,10 @@
 /data/
 /neural-tangents-main/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+*.so
+build/
+dist/

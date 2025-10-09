@@ -182,7 +182,9 @@ def _elementwise(fn: Callable, name: str, kernel_fn: Optional[Callable] = None) 
     
     def apply_fn(params: PyTree,
                 inputs: torch.Tensor,
-                rng: Optional[torch.Generator] = None) -> torch.Tensor:
+                rng: Optional[torch.Generator] = None,
+                mask: Optional[torch.Tensor] = None,
+                **kwargs) -> torch.Tensor:
         """Apply the activation function."""
         return fn(inputs)
     

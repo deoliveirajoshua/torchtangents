@@ -52,14 +52,15 @@ def serial(*layers: InternalLayer) -> InternalLayer:
     
     def apply_fn(params: PyTree, 
                 inputs: torch.Tensor, 
-                rng: Optional[torch.Generator] = None) -> torch.Tensor:
+                rng: Optional[torch.Generator] = None,
+                **kwargs) -> torch.Tensor:
         """Apply all layers in sequence."""
         if len(params) != len(layers):
             raise ValueError(f"Expected {len(layers)} parameter sets, got {len(params)}")
         
         outputs = inputs
         for param, (_, layer_apply, _) in zip(params, layers):
-            outputs = layer_apply(param, outputs, rng)
+            outputs = layer_apply(param, outputs, rng=rng, **kwargs)
         
         return outputs
     
@@ -104,14 +105,15 @@ def parallel(*layers: InternalLayer) -> InternalLayer:
     
     def apply_fn(params: PyTree,
                 inputs: torch.Tensor,
-                rng: Optional[torch.Generator] = None) -> tuple:
+                rng: Optional[torch.Generator] = None,
+                **kwargs) -> tuple:
         """Apply all layers in parallel and return tuple of outputs."""
         if len(params) != len(layers):
             raise ValueError(f"Expected {len(layers)} parameter sets, got {len(params)}")
         
         outputs = []
         for param, (_, layer_apply, _) in zip(params, layers):
-            output = layer_apply(param, inputs, rng)
+            output = layer_apply(param, inputs, rng=rng, **kwargs)
             outputs.append(output)
         
         return tuple(outputs)

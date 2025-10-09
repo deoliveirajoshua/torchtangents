@@ -1039,6 +1039,7 @@ def _preprocess_kernel_fn(
         return isinstance(x, (Kernel, torch.Tensor))
 
       return tree_all(
+          lambda x: x,  # Check if all boolean values are True
           tree_map(
               lambda x: isinstance(x, cls),
               x,
