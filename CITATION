@@ -1,0 +1,6 @@
+@software{torchtangents2025,
+  title        = {torchtangents: Infinite-width neural networks and NTKs in PyTorch},
+  author       = {Joshua DeOliveira},
+  year         = {2026},
+  url          = {https://github.com/deoliveirajoshua/torchtangents}
+}

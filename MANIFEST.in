@@ -1,0 +1,9 @@
+include LICENSE
+include NOTICE
+include README.md
+include CITATION
+include CITATION.cff
+include torchtangents/py.typed
+recursive-exclude tests *
+recursive-exclude benchmarking *
+recursive-exclude examples *

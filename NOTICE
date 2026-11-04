@@ -1,0 +1,10 @@
+TorchTangents
+Copyright 2026
+
+This product includes software developed at Google LLC.
+It is a PyTorch port and derivative work of the "neural-tangents" repository
+(https://github.com/google/neural-tangents), originally authored by Google LLC.
+
+Original neural-tangents copyright note:
+Copyright 2019 Google LLC
+Licensed under the Apache License, Version 2.0

@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+message: "If you use TorchTangents in academic research, please cite it as below."
+title: "TorchTangents: Infinite-Width Neural Networks and Neural Tangent Kernels in PyTorch"
+abstract: "A PyTorch-native port and extension of Google's JAX Neural Tangents library, providing exact infinite-width NNGP and NTK kernel computation, model lifting, and architecture-aware optimization."
+authors:
+  - family-names: "DeOliveira"
+    given-names: "Joshua"
+    email: "jcdeoliveira@wpi.edu"
+    affiliation: "Worcester Polytechnic Institute"
+version: 0.1.1
+date-released: 2026-11-03
+license: "Apache-2.0"
+repository-code: "https://github.com/deoliveirajoshua/torchtangents"
+url: "https://github.com/deoliveirajoshua/torchtangents"
+keywords:
+  - "deep-learning"
+  - "neural-tangent-kernel"
+  - "nngp"
+  - "infinite-width"
+  - "gaussian-processes"
+  - "pytorch"
+

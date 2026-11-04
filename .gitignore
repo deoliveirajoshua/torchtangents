@@ -1,0 +1,15 @@
+__pycache__/
+*.egg-info/
+.idea/
+.vscode/
+.pytest_cache/
+venv/
+tmp/
+build/
+dist/
+neural-tangents-main/
+TODO.md
+STAX_PARITY_STATUS.md
+
+htmlcov/
+.coverage
