@@ -96,6 +96,7 @@ def save_results_to_csv(out_path, results, framework, model, batch_size, input_d
         'MemoryCompiledMean_GB',
         'MemoryCompiledStd_GB',
         'Speedup',
+        'MemReduction',
     ]
 
     def parse_stat(val):
@@ -116,12 +117,15 @@ def save_results_to_csv(out_path, results, framework, model, batch_size, input_d
         tc_mean, tc_std = "", ""
         mc_mean, mc_std = "", ""
         speedup = ""
+        mem_reduction = ""
 
         if r.get('TimeCompiled') is not None:
             tc_mean, tc_std = parse_stat(r.get('TimeCompiled'))
             mc_mean, mc_std = parse_stat(r.get('MemoryCompiled'))
             if isinstance(t_mean, (float, int)) and isinstance(tc_mean, (float, int)) and tc_mean > 0:
                 speedup = f"{t_mean / tc_mean:.2f}x"
+            if isinstance(m_mean, (float, int)) and isinstance(mc_mean, (float, int)) and mc_mean > 0 and m_mean > 0:
+                mem_reduction = f"{m_mean / mc_mean:.2f}x"
 
         row = {
             'Framework': framework,
@@ -140,6 +144,7 @@ def save_results_to_csv(out_path, results, framework, model, batch_size, input_d
             'MemoryCompiledMean_GB': mc_mean,
             'MemoryCompiledStd_GB': mc_std,
             'Speedup': speedup,
+            'MemReduction': mem_reduction,
         }
         rows.append(row)
 
@@ -489,8 +494,8 @@ def main():
 
     if args.compile:
         # Grouped Header with Mean ± Std
-        print(f"| {'Platform':<{platform_width}} | {'Format':<6} | {'Prec':<4} | {'Uncompiled (ms)':<26} | {'(GB)':<16} | {'Compiled (ms)':<26} | {'(GB)':<16} | {'Speedup':<8} |")
-        print(f"| :{'-'*(platform_width-1)} | :{'-'*5} | :{'-'*3} | :{'-'*25} | :{'-'*15} | :{'-'*25} | :{'-'*15} | :{'-'*7} |")
+        print(f"| {'Platform':<{platform_width}} | {'Format':<6} | {'Prec':<4} | {'Uncompiled (ms)':<26} | {'(GB)':<16} | {'Compiled (ms)':<26} | {'(GB)':<16} | {'Speedup':<8} | {'Mem Reduct':<10} |")
+        print(f"| :{'-'*(platform_width-1)} | :{'-'*5} | :{'-'*3} | :{'-'*25} | :{'-'*15} | :{'-'*25} | :{'-'*15} | :{'-'*7} | :{'-'*9} |")
     else:
         # Standard Header with Mean ± Std
         print(f"| {'Platform':<{platform_width}} | {'Format':<6} | {'Prec':<4} | {'Milliseconds / NTK entry':<28} | {'Memory (GB)':<16} |")
@@ -502,7 +507,7 @@ def main():
         plat_display = r['Platform'] if r['Platform'] != current_platform else ""
         if r['Platform'] != current_platform and current_platform is not None:
             if args.compile:
-                print(f"| {'-'*platform_width} | {'-'*6} | {'-'*4} | {'-'*26} | {'-'*16} | {'-'*26} | {'-'*16} | {'-'*8} |")
+                print(f"| {'-'*platform_width} | {'-'*6} | {'-'*4} | {'-'*26} | {'-'*16} | {'-'*26} | {'-'*16} | {'-'*8} | {'-'*10} |")
             else:
                 print(f"| {'-'*platform_width} | {'-'*6} | {'-'*4} | {'-'*28} | {'-'*16} |")
 
@@ -514,14 +519,20 @@ def main():
                 time_comp_str = format_stat(r['TimeCompiled'], prec=6)
                 mem_comp_str = format_stat(r['MemoryCompiled'], prec=3)
                 speedup = "--"
+                mem_reduction = "--"
                 t_uncomp = get_mean(r['Time'])
                 t_comp = get_mean(r['TimeCompiled'])
                 if isinstance(t_uncomp, (float, int)) and isinstance(t_comp, (float, int)) and t_comp > 0:
                     speedup = f"{t_uncomp / t_comp:.2f}x"
 
-                print(f"| {plat_display:<{platform_width}} | {r['Format']:<6} | {r['Precision']:<4} | {time_str:<26} | {mem_str:<16} | {time_comp_str:<26} | {mem_comp_str:<16} | {speedup:<8} |")
+                m_uncomp = get_mean(r['Memory'])
+                m_comp = get_mean(r['MemoryCompiled'])
+                if isinstance(m_uncomp, (float, int)) and isinstance(m_comp, (float, int)) and m_comp > 0 and m_uncomp > 0:
+                    mem_reduction = f"{m_uncomp / m_comp:.2f}x"
+
+                print(f"| {plat_display:<{platform_width}} | {r['Format']:<6} | {r['Precision']:<4} | {time_str:<26} | {mem_str:<16} | {time_comp_str:<26} | {mem_comp_str:<16} | {speedup:<8} | {mem_reduction:<10} |")
             else:
-                print(f"| {plat_display:<{platform_width}} | {r['Format']:<6} | {r['Precision']:<4} | {time_str:<26} | {mem_str:<16} | {'N/A':<26} | {'N/A':<16} | {'--':<8} |")
+                print(f"| {plat_display:<{platform_width}} | {r['Format']:<6} | {r['Precision']:<4} | {time_str:<26} | {mem_str:<16} | {'N/A':<26} | {'N/A':<16} | {'--':<8} | {'--':<10} |")
         else:
             print(f"| {plat_display:<{platform_width}} | {r['Format']:<6} | {r['Precision']:<4} | {time_str:<28} | {mem_str:<16} |")
 
