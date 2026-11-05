@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import csv
 import logging
 import warnings
 import numpy as np
@@ -28,6 +29,8 @@ logging.getLogger("torch.utils._sympy").setLevel(logging.ERROR)
 torch._dynamo.config.cache_size_limit = 64  # Allow more metadata variants
 
 def run_benchmark(device, dtype, use_tf32=False, batch_size=128, input_dim=64, model_type='mlp', use_compile=False, num_iters=None, warmup_iters=None, pbar=None, format_label=""):
+    times = []
+    mems = []
     try:
         if device.type == 'cuda':
             torch.backends.cuda.matmul.allow_tf32 = use_tf32
@@ -179,6 +182,83 @@ def run_benchmark(device, dtype, use_tf32=False, batch_size=128, input_dim=64, m
                 pbar.update(remaining)
         return (f"Error: {e}", 0.0), (0.0, 0.0)
 
+def save_results_to_csv(out_path, results, framework, model, batch_size, input_dim):
+    parent_dir = os.path.dirname(out_path)
+    if parent_dir:
+        os.makedirs(parent_dir, exist_ok=True)
+
+    fieldnames = [
+        'Framework',
+        'Platform',
+        'Model',
+        'BatchSize',
+        'InputDim',
+        'Format',
+        'Precision',
+        'TimeMean_ms',
+        'TimeStd_ms',
+        'MemoryMean_GB',
+        'MemoryStd_GB',
+        'TimeCompiledMean_ms',
+        'TimeCompiledStd_ms',
+        'MemoryCompiledMean_GB',
+        'MemoryCompiledStd_GB',
+        'Speedup',
+    ]
+
+    def parse_stat(val):
+        if isinstance(val, (tuple, list)):
+            mean, std = val
+            if isinstance(mean, (float, int)):
+                return mean, std
+            return mean, ""
+        elif isinstance(val, (float, int)):
+            return val, ""
+        return val, ""
+
+    rows = []
+    for r in results:
+        t_mean, t_std = parse_stat(r.get('Time'))
+        m_mean, m_std = parse_stat(r.get('Memory'))
+
+        tc_mean, tc_std = "", ""
+        mc_mean, mc_std = "", ""
+        speedup = ""
+
+        if r.get('TimeCompiled') is not None:
+            tc_mean, tc_std = parse_stat(r.get('TimeCompiled'))
+            mc_mean, mc_std = parse_stat(r.get('MemoryCompiled'))
+            if isinstance(t_mean, (float, int)) and isinstance(tc_mean, (float, int)) and tc_mean > 0:
+                speedup = f"{t_mean / tc_mean:.2f}x"
+
+        row = {
+            'Framework': framework,
+            'Platform': r['Platform'],
+            'Model': model,
+            'BatchSize': batch_size,
+            'InputDim': input_dim,
+            'Format': r['Format'],
+            'Precision': r['Precision'],
+            'TimeMean_ms': t_mean,
+            'TimeStd_ms': t_std,
+            'MemoryMean_GB': m_mean,
+            'MemoryStd_GB': m_std,
+            'TimeCompiledMean_ms': tc_mean,
+            'TimeCompiledStd_ms': tc_std,
+            'MemoryCompiledMean_GB': mc_mean,
+            'MemoryCompiledStd_GB': mc_std,
+            'Speedup': speedup,
+        }
+        rows.append(row)
+
+    with open(out_path, mode='w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    print(f"\n[INFO] Benchmark results saved to: {out_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(description='Run TorchTangents benchmarks.')
     parser.add_argument('--batch_size', type=int, default=None, help='Batch size for N_train and N_test')
@@ -188,6 +268,7 @@ def main():
     parser.add_argument('--warmup_iters', type=int, default=None, help='Number of warmup iterations')
     parser.add_argument('--skip_cpu', action='store_true', help='Skip CPU benchmarking')
     parser.add_argument('--compile', action='store_true', help='Also run and compare with torch.compile using max-autotune (can be extremely slow to compile startup)')
+    parser.add_argument('-o', '--out', type=str, default=None, help='Path to output CSV file to save benchmark results')
     args = parser.parse_args()
     
     # Model-specific defaults if not explicitly provided
@@ -348,6 +429,9 @@ def main():
             print(f"| {plat_display:<{platform_width}} | {r['Format']:<6} | {r['Precision']:<4} | {time_str:<28} | {mem_str:<16} |")
             
         current_platform = r['Platform']
+
+    if args.out:
+        save_results_to_csv(args.out, results, 'TorchTangents', args.model, args.batch_size, args.input_dim)
 
 if __name__ == "__main__":
     main()
