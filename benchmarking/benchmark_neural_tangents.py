@@ -371,6 +371,7 @@ def main():
     parser.add_argument('--warmup_iters', type=int, default=None, help='Number of warmup iterations')
     parser.add_argument('--skip_cpu', action='store_true', help='Skip CPU benchmarking')
     parser.add_argument('--compile', '--jit', action='store_true', dest='compile', help='Also run and compare with jax.jit compilation')
+    parser.add_argument('--compile_only', '--jit_only', action='store_true', dest='compile_only', help='Only run jax.jit compiled benchmarks (skips uncompiled runs)')
     parser.add_argument('-o', '--out', type=str, default=None, help='Path to output CSV file to save benchmark results')
     args = parser.parse_args()
 
@@ -416,25 +417,37 @@ def main():
 
     if not args.skip_cpu:
         eff_iters = args.num_iters if args.num_iters is not None else (5 if args.model in ('cnn', 'resnet') else 20)
-        runs_per_config = 2 if args.compile else 1
+        run_uncompiled = not args.compile_only
+        run_compiled = args.compile or args.compile_only
+        runs_per_config = (1 if run_uncompiled else 0) + (1 if run_compiled else 0)
         total_cpu_iters = len(configs) * eff_iters * runs_per_config
-        format_info = f"{eff_iters} iters x 2 (uncompiled + jax.jit)" if args.compile else f"{eff_iters} iters"
+        if args.compile_only:
+            format_info = f"{eff_iters} iters (jax.jit only)"
+        elif args.compile:
+            format_info = f"{eff_iters} iters x 2 (uncompiled + jax.jit)"
+        else:
+            format_info = f"{eff_iters} iters"
         print(f"Running benchmarks for CPU... (model={args.model}, batch_size={args.batch_size}, input_dim={args.input_dim}, {format_info})")
         with tqdm(total=total_cpu_iters, desc="Benchmarking CPU", unit="iter") as pbar:
             for cfg in configs:
                 label = f"{cfg['format']}{cfg['precision']}"
-                uncomp_desc = f"CPU ({label} uncompiled)" if args.compile else f"CPU ({label})"
-                pbar.set_description(uncomp_desc)
 
-                res_entry, res_total, mem = run_benchmark(
-                    cpu_device, cfg['dtype'], cfg['matmul_precision'],
-                    args.batch_size, args.input_dim, args.model,
-                    use_compile=False, num_iters=args.num_iters, warmup_iters=args.warmup_iters,
-                    pbar=pbar, format_label=label
-                )
+                res_entry, res_total, mem = None, None, None
+                if run_uncompiled:
+                    clear_device_cache(cpu_device)
+                    uncomp_desc = f"CPU ({label} uncompiled)" if args.compile else f"CPU ({label})"
+                    pbar.set_description(uncomp_desc)
+                    res_entry, res_total, mem = run_benchmark(
+                        cpu_device, cfg['dtype'], cfg['matmul_precision'],
+                        args.batch_size, args.input_dim, args.model,
+                        use_compile=False, num_iters=args.num_iters, warmup_iters=args.warmup_iters,
+                        pbar=pbar, format_label=label
+                    )
+                    clear_device_cache(cpu_device)
 
                 res_entry_compiled, res_total_compiled, mem_compiled = None, None, None
-                if args.compile:
+                if run_compiled:
+                    clear_device_cache(cpu_device)
                     pbar.set_description(f"CPU ({label} jax.jit)")
                     res_entry_compiled, res_total_compiled, mem_compiled = run_benchmark(
                         cpu_device, cfg['dtype'], cfg['matmul_precision'],
@@ -442,6 +455,7 @@ def main():
                         use_compile=True, num_iters=args.num_iters, warmup_iters=args.warmup_iters,
                         pbar=pbar, format_label=f"{label}-jit"
                     )
+                    clear_device_cache(cpu_device)
 
                 results.append({
                     'Platform': 'CPU',
@@ -458,29 +472,38 @@ def main():
     if gpu_device is not None:
         gpu_name = get_device_name(gpu_device)
         eff_iters = args.num_iters if args.num_iters is not None else 20
-        runs_per_config = 2 if args.compile else 1
+        run_uncompiled = not args.compile_only
+        run_compiled = args.compile or args.compile_only
+        runs_per_config = (1 if run_uncompiled else 0) + (1 if run_compiled else 0)
         total_gpu_iters = len(gpu_configs) * eff_iters * runs_per_config
-        format_info = f"{eff_iters} iters x 2 (uncompiled + jax.jit)" if args.compile else f"{eff_iters} iters"
+        if args.compile_only:
+            format_info = f"{eff_iters} iters (jax.jit only)"
+        elif args.compile:
+            format_info = f"{eff_iters} iters x 2 (uncompiled + jax.jit)"
+        else:
+            format_info = f"{eff_iters} iters"
         print(f"Running benchmarks for {gpu_name}... (model={args.model}, batch_size={args.batch_size}, input_dim={args.input_dim}, {format_info})")
         with tqdm(total=total_gpu_iters, desc=f"Benchmarking {gpu_name}", unit="iter") as pbar:
             for cfg in gpu_configs:
                 label = f"{cfg['format']}{cfg['precision']}"
 
                 # Uncompiled benchmark
-                clear_device_cache(gpu_device)
-                uncomp_desc = f"{gpu_name} ({label} uncompiled)" if args.compile else f"{gpu_name} ({label})"
-                pbar.set_description(uncomp_desc)
-                res_entry, res_total, mem = run_benchmark(
-                    gpu_device, cfg['dtype'], cfg['matmul_precision'],
-                    args.batch_size, args.input_dim, args.model,
-                    use_compile=False, num_iters=args.num_iters, warmup_iters=args.warmup_iters,
-                    pbar=pbar, format_label=label
-                )
-                clear_device_cache(gpu_device)
+                res_entry, res_total, mem = None, None, None
+                if run_uncompiled:
+                    clear_device_cache(gpu_device)
+                    uncomp_desc = f"{gpu_name} ({label} uncompiled)" if args.compile else f"{gpu_name} ({label})"
+                    pbar.set_description(uncomp_desc)
+                    res_entry, res_total, mem = run_benchmark(
+                        gpu_device, cfg['dtype'], cfg['matmul_precision'],
+                        args.batch_size, args.input_dim, args.model,
+                        use_compile=False, num_iters=args.num_iters, warmup_iters=args.warmup_iters,
+                        pbar=pbar, format_label=label
+                    )
+                    clear_device_cache(gpu_device)
 
                 # Compiled benchmark if requested
                 res_entry_compiled, res_total_compiled, mem_compiled = None, None, None
-                if args.compile:
+                if run_compiled:
                     clear_device_cache(gpu_device)
                     pbar.set_description(f"{gpu_name} ({label} jax.jit)")
                     res_entry_compiled, res_total_compiled, mem_compiled = run_benchmark(
@@ -527,7 +550,10 @@ def main():
 
     print(f"\n--- Neural Tangents Performance Table ({args.model.upper()}) ---")
 
-    if args.compile:
+    if args.compile_only:
+        print(f"| {'Platform':<{platform_width}} | {'Format':<6} | {'Prec':<4} | {'Compiled Total (ms)':<24} | {'Compiled/entry (ms)':<24} | {'Memory (GB)':<16} |")
+        print(f"| :{'-'*(platform_width-1)} | :{'-'*5} | :{'-'*3} | :{'-'*23} | :{'-'*23} | :{'-'*15} |")
+    elif args.compile:
         # Grouped Header with Mean ± Std
         print(f"| {'Platform':<{platform_width}} | {'Format':<6} | {'Prec':<4} | {'Uncomp Total (ms)':<22} | {'Uncomp/entry (ms)':<22} | {'(GB)':<14} | {'Comp Total (ms)':<22} | {'Comp/entry (ms)':<22} | {'(GB)':<14} | {'Speedup':<8} | {'Mem Reduct':<10} |")
         print(f"| :{'-'*(platform_width-1)} | :{'-'*5} | :{'-'*3} | :{'-'*21} | :{'-'*21} | :{'-'*13} | :{'-'*21} | :{'-'*21} | :{'-'*13} | :{'-'*7} | :{'-'*9} |")
@@ -541,7 +567,9 @@ def main():
         # Platform display optimization
         plat_display = r['Platform'] if r['Platform'] != current_platform else ""
         if r['Platform'] != current_platform and current_platform is not None:
-            if args.compile:
+            if args.compile_only:
+                print(f"| {'-'*platform_width} | {'-'*6} | {'-'*4} | {'-'*24} | {'-'*24} | {'-'*16} |")
+            elif args.compile:
                 print(f"| {'-'*platform_width} | {'-'*6} | {'-'*4} | {'-'*22} | {'-'*22} | {'-'*14} | {'-'*22} | {'-'*22} | {'-'*14} | {'-'*8} | {'-'*10} |")
             else:
                 print(f"| {'-'*platform_width} | {'-'*6} | {'-'*4} | {'-'*24} | {'-'*24} | {'-'*16} |")
@@ -550,7 +578,12 @@ def main():
         entry_time_str = format_stat(r['TimeEntry'], prec=6)
         mem_str = format_stat(r['Memory'], prec=3)
 
-        if args.compile:
+        if args.compile_only:
+            comp_total_time_str = format_stat(r['TimeTotalCompiled'], prec=4)
+            comp_entry_time_str = format_stat(r['TimeEntryCompiled'], prec=6)
+            mem_comp_str = format_stat(r['MemoryCompiled'], prec=3)
+            print(f"| {plat_display:<{platform_width}} | {r['Format']:<6} | {r['Precision']:<4} | {comp_total_time_str:<24} | {comp_entry_time_str:<24} | {mem_comp_str:<16} |")
+        elif args.compile:
             if r.get('TimeTotalCompiled') is not None or r.get('TimeEntryCompiled') is not None:
                 comp_total_time_str = format_stat(r['TimeTotalCompiled'], prec=4)
                 comp_entry_time_str = format_stat(r['TimeEntryCompiled'], prec=6)
