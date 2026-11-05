@@ -87,10 +87,18 @@ def save_results_to_csv(out_path, results, framework, model, batch_size, input_d
         'InputDim',
         'Format',
         'Precision',
+        'TotalTimeMean_ms',
+        'TotalTimeStd_ms',
+        'TimePerEntryMean_ms',
+        'TimePerEntryStd_ms',
         'TimeMean_ms',
         'TimeStd_ms',
         'MemoryMean_GB',
         'MemoryStd_GB',
+        'TotalTimeCompiledMean_ms',
+        'TotalTimeCompiledStd_ms',
+        'TimePerEntryCompiledMean_ms',
+        'TimePerEntryCompiledStd_ms',
         'TimeCompiledMean_ms',
         'TimeCompiledStd_ms',
         'MemoryCompiledMean_GB',
@@ -111,19 +119,24 @@ def save_results_to_csv(out_path, results, framework, model, batch_size, input_d
 
     rows = []
     for r in results:
-        t_mean, t_std = parse_stat(r.get('Time'))
+        tt_mean, tt_std = parse_stat(r.get('TimeTotal'))
+        te_mean, te_std = parse_stat(r.get('TimeEntry'))
         m_mean, m_std = parse_stat(r.get('Memory'))
 
-        tc_mean, tc_std = "", ""
+        ttc_mean, ttc_std = "", ""
+        tec_mean, tec_std = "", ""
         mc_mean, mc_std = "", ""
         speedup = ""
         mem_reduction = ""
 
-        if r.get('TimeCompiled') is not None:
-            tc_mean, tc_std = parse_stat(r.get('TimeCompiled'))
+        if r.get('TimeTotalCompiled') is not None or r.get('TimeEntryCompiled') is not None:
+            ttc_mean, ttc_std = parse_stat(r.get('TimeTotalCompiled'))
+            tec_mean, tec_std = parse_stat(r.get('TimeEntryCompiled'))
             mc_mean, mc_std = parse_stat(r.get('MemoryCompiled'))
-            if isinstance(t_mean, (float, int)) and isinstance(tc_mean, (float, int)) and tc_mean > 0:
-                speedup = f"{t_mean / tc_mean:.2f}x"
+            if isinstance(tt_mean, (float, int)) and isinstance(ttc_mean, (float, int)) and ttc_mean > 0:
+                speedup = f"{tt_mean / ttc_mean:.2f}x"
+            elif isinstance(te_mean, (float, int)) and isinstance(tec_mean, (float, int)) and tec_mean > 0:
+                speedup = f"{te_mean / tec_mean:.2f}x"
             if isinstance(m_mean, (float, int)) and isinstance(mc_mean, (float, int)) and mc_mean > 0 and m_mean > 0:
                 mem_reduction = f"{m_mean / mc_mean:.2f}x"
 
@@ -135,12 +148,20 @@ def save_results_to_csv(out_path, results, framework, model, batch_size, input_d
             'InputDim': input_dim,
             'Format': r['Format'],
             'Precision': r['Precision'],
-            'TimeMean_ms': t_mean,
-            'TimeStd_ms': t_std,
+            'TotalTimeMean_ms': tt_mean,
+            'TotalTimeStd_ms': tt_std,
+            'TimePerEntryMean_ms': te_mean,
+            'TimePerEntryStd_ms': te_std,
+            'TimeMean_ms': te_mean,
+            'TimeStd_ms': te_std,
             'MemoryMean_GB': m_mean,
             'MemoryStd_GB': m_std,
-            'TimeCompiledMean_ms': tc_mean,
-            'TimeCompiledStd_ms': tc_std,
+            'TotalTimeCompiledMean_ms': ttc_mean,
+            'TotalTimeCompiledStd_ms': ttc_std,
+            'TimePerEntryCompiledMean_ms': tec_mean,
+            'TimePerEntryCompiledStd_ms': tec_std,
+            'TimeCompiledMean_ms': tec_mean,
+            'TimeCompiledStd_ms': tec_std,
             'MemoryCompiledMean_GB': mc_mean,
             'MemoryCompiledStd_GB': mc_std,
             'Speedup': speedup,
@@ -252,7 +273,7 @@ def run_benchmark(device, dtype, matmul_precision='default', batch_size=128, inp
                     if pbar is not None:
                         eff_i = num_iters if num_iters is not None else 20
                         pbar.update(eff_i)
-                    return (f"Compilation Error: {e}", 0.0), (0.0, 0.0)
+                    return (f"Compilation Error: {e}", 0.0), (f"Compilation Error: {e}", 0.0), (0.0, 0.0)
             else:
                 _get_ntk = _raw_get_ntk
 
@@ -270,7 +291,8 @@ def run_benchmark(device, dtype, matmul_precision='default', batch_size=128, inp
             reset_device_peak_mem(device)
 
             # Benchmark per-iteration timing & memory
-            times = []
+            times_entry = []
+            times_total = []
             mems = []
             entries = batch_size * batch_size
 
@@ -286,45 +308,54 @@ def run_benchmark(device, dtype, matmul_precision='default', batch_size=128, inp
                 mem_gb = get_device_peak_mem_gb(device)
                 mems.append(mem_gb)
 
-                time_entry_ms = ((t1 - t0) * 1000.0) / entries
-                times.append(time_entry_ms)
+                time_total_ms = (t1 - t0) * 1000.0
+                time_entry_ms = time_total_ms / entries
+                times_total.append(time_total_ms)
+                times_entry.append(time_entry_ms)
 
                 if pbar is not None:
                     pbar.update(1)
-                    postfix = {"prec": format_label, "ms/entry": f"{time_entry_ms:.5f}"}
+                    postfix = {
+                        "prec": format_label,
+                        "total_ms": f"{time_total_ms:.3f}",
+                        "ms/entry": f"{time_entry_ms:.5f}"
+                    }
                     if device.platform != 'cpu':
                         postfix["mem_gb"] = f"{mem_gb:.3f}"
                     pbar.set_postfix(postfix)
 
-            time_mean = float(np.mean(times))
-            time_std = float(np.std(times, ddof=1)) if len(times) > 1 else 0.0
+            time_entry_mean = float(np.mean(times_entry))
+            time_entry_std = float(np.std(times_entry, ddof=1)) if len(times_entry) > 1 else 0.0
+
+            time_total_mean = float(np.mean(times_total))
+            time_total_std = float(np.std(times_total, ddof=1)) if len(times_total) > 1 else 0.0
 
             mem_mean = float(np.mean(mems)) if mems else 0.0
             mem_std = float(np.std(mems, ddof=1)) if len(mems) > 1 else 0.0
 
-            return (time_mean, time_std), (mem_mean, mem_std)
+            return (time_entry_mean, time_entry_std), (time_total_mean, time_total_std), (mem_mean, mem_std)
 
     except RuntimeError as e:
         if pbar is not None:
             eff_i = num_iters if num_iters is not None else 20
-            remaining = eff_i - len(times)
+            remaining = eff_i - len(times_entry)
             if remaining > 0:
                 pbar.update(remaining)
         err_lower = str(e).lower()
         if "out of memory" in err_lower or "resourceexhausted" in err_lower:
-            return ("OOM", 0.0), (0.0, 0.0)
+            return ("OOM", 0.0), ("OOM", 0.0), (0.0, 0.0)
         else:
-            return (f"Error: {e}", 0.0), (0.0, 0.0)
+            return (f"Error: {e}", 0.0), (f"Error: {e}", 0.0), (0.0, 0.0)
     except Exception as e:
         if pbar is not None:
             eff_i = num_iters if num_iters is not None else 20
-            remaining = eff_i - len(times)
+            remaining = eff_i - len(times_entry)
             if remaining > 0:
                 pbar.update(remaining)
         err_lower = str(e).lower()
         if "out of memory" in err_lower or "resourceexhausted" in err_lower:
-            return ("OOM", 0.0), (0.0, 0.0)
-        return (f"Error: {e}", 0.0), (0.0, 0.0)
+            return ("OOM", 0.0), ("OOM", 0.0), (0.0, 0.0)
+        return (f"Error: {e}", 0.0), (f"Error: {e}", 0.0), (0.0, 0.0)
     finally:
         jax.config.update("jax_enable_x64", False)
         jax.config.update("jax_default_matmul_precision", None)
@@ -395,17 +426,17 @@ def main():
                 uncomp_desc = f"CPU ({label} uncompiled)" if args.compile else f"CPU ({label})"
                 pbar.set_description(uncomp_desc)
 
-                res, mem = run_benchmark(
+                res_entry, res_total, mem = run_benchmark(
                     cpu_device, cfg['dtype'], cfg['matmul_precision'],
                     args.batch_size, args.input_dim, args.model,
                     use_compile=False, num_iters=args.num_iters, warmup_iters=args.warmup_iters,
                     pbar=pbar, format_label=label
                 )
 
-                res_compiled, mem_compiled = None, None
+                res_entry_compiled, res_total_compiled, mem_compiled = None, None, None
                 if args.compile:
                     pbar.set_description(f"CPU ({label} jax.jit)")
-                    res_compiled, mem_compiled = run_benchmark(
+                    res_entry_compiled, res_total_compiled, mem_compiled = run_benchmark(
                         cpu_device, cfg['dtype'], cfg['matmul_precision'],
                         args.batch_size, args.input_dim, args.model,
                         use_compile=True, num_iters=args.num_iters, warmup_iters=args.warmup_iters,
@@ -416,9 +447,11 @@ def main():
                     'Platform': 'CPU',
                     'Format': cfg['format'],
                     'Precision': cfg['precision'],
-                    'Time': res,
+                    'TimeEntry': res_entry,
+                    'TimeTotal': res_total,
                     'Memory': mem,
-                    'TimeCompiled': res_compiled,
+                    'TimeEntryCompiled': res_entry_compiled,
+                    'TimeTotalCompiled': res_total_compiled,
                     'MemoryCompiled': mem_compiled
                 })
 
@@ -437,7 +470,7 @@ def main():
                 clear_device_cache(gpu_device)
                 uncomp_desc = f"{gpu_name} ({label} uncompiled)" if args.compile else f"{gpu_name} ({label})"
                 pbar.set_description(uncomp_desc)
-                res, mem = run_benchmark(
+                res_entry, res_total, mem = run_benchmark(
                     gpu_device, cfg['dtype'], cfg['matmul_precision'],
                     args.batch_size, args.input_dim, args.model,
                     use_compile=False, num_iters=args.num_iters, warmup_iters=args.warmup_iters,
@@ -446,11 +479,11 @@ def main():
                 clear_device_cache(gpu_device)
 
                 # Compiled benchmark if requested
-                res_compiled, mem_compiled = None, None
+                res_entry_compiled, res_total_compiled, mem_compiled = None, None, None
                 if args.compile:
                     clear_device_cache(gpu_device)
                     pbar.set_description(f"{gpu_name} ({label} jax.jit)")
-                    res_compiled, mem_compiled = run_benchmark(
+                    res_entry_compiled, res_total_compiled, mem_compiled = run_benchmark(
                         gpu_device, cfg['dtype'], cfg['matmul_precision'],
                         args.batch_size, args.input_dim, args.model,
                         use_compile=True, num_iters=args.num_iters, warmup_iters=args.warmup_iters,
@@ -462,9 +495,11 @@ def main():
                     'Platform': gpu_name,
                     'Format': cfg['format'],
                     'Precision': cfg['precision'],
-                    'Time': res,
+                    'TimeEntry': res_entry,
+                    'TimeTotal': res_total,
                     'Memory': mem,
-                    'TimeCompiled': res_compiled,
+                    'TimeEntryCompiled': res_entry_compiled,
+                    'TimeTotalCompiled': res_total_compiled,
                     'MemoryCompiled': mem_compiled
                 })
 
@@ -494,12 +529,12 @@ def main():
 
     if args.compile:
         # Grouped Header with Mean ± Std
-        print(f"| {'Platform':<{platform_width}} | {'Format':<6} | {'Prec':<4} | {'Uncompiled (ms)':<26} | {'(GB)':<16} | {'Compiled (ms)':<26} | {'(GB)':<16} | {'Speedup':<8} | {'Mem Reduct':<10} |")
-        print(f"| :{'-'*(platform_width-1)} | :{'-'*5} | :{'-'*3} | :{'-'*25} | :{'-'*15} | :{'-'*25} | :{'-'*15} | :{'-'*7} | :{'-'*9} |")
+        print(f"| {'Platform':<{platform_width}} | {'Format':<6} | {'Prec':<4} | {'Uncomp Total (ms)':<22} | {'Uncomp/entry (ms)':<22} | {'(GB)':<14} | {'Comp Total (ms)':<22} | {'Comp/entry (ms)':<22} | {'(GB)':<14} | {'Speedup':<8} | {'Mem Reduct':<10} |")
+        print(f"| :{'-'*(platform_width-1)} | :{'-'*5} | :{'-'*3} | :{'-'*21} | :{'-'*21} | :{'-'*13} | :{'-'*21} | :{'-'*21} | :{'-'*13} | :{'-'*7} | :{'-'*9} |")
     else:
         # Standard Header with Mean ± Std
-        print(f"| {'Platform':<{platform_width}} | {'Format':<6} | {'Prec':<4} | {'Milliseconds / NTK entry':<28} | {'Memory (GB)':<16} |")
-        print(f"| :{'-'*(platform_width-1)} | :{'-'*5} | :{'-'*3} | :{'-'*27} | :{'-'*15} |")
+        print(f"| {'Platform':<{platform_width}} | {'Format':<6} | {'Prec':<4} | {'Total Time (ms)':<24} | {'ms / entry':<24} | {'Memory (GB)':<16} |")
+        print(f"| :{'-'*(platform_width-1)} | :{'-'*5} | :{'-'*3} | :{'-'*23} | :{'-'*23} | :{'-'*15} |")
 
     current_platform = None
     for r in results:
@@ -507,21 +542,23 @@ def main():
         plat_display = r['Platform'] if r['Platform'] != current_platform else ""
         if r['Platform'] != current_platform and current_platform is not None:
             if args.compile:
-                print(f"| {'-'*platform_width} | {'-'*6} | {'-'*4} | {'-'*26} | {'-'*16} | {'-'*26} | {'-'*16} | {'-'*8} | {'-'*10} |")
+                print(f"| {'-'*platform_width} | {'-'*6} | {'-'*4} | {'-'*22} | {'-'*22} | {'-'*14} | {'-'*22} | {'-'*22} | {'-'*14} | {'-'*8} | {'-'*10} |")
             else:
-                print(f"| {'-'*platform_width} | {'-'*6} | {'-'*4} | {'-'*28} | {'-'*16} |")
+                print(f"| {'-'*platform_width} | {'-'*6} | {'-'*4} | {'-'*24} | {'-'*24} | {'-'*16} |")
 
-        time_str = format_stat(r['Time'], prec=6)
+        total_time_str = format_stat(r['TimeTotal'], prec=4)
+        entry_time_str = format_stat(r['TimeEntry'], prec=6)
         mem_str = format_stat(r['Memory'], prec=3)
 
         if args.compile:
-            if r.get('TimeCompiled') is not None:
-                time_comp_str = format_stat(r['TimeCompiled'], prec=6)
+            if r.get('TimeTotalCompiled') is not None or r.get('TimeEntryCompiled') is not None:
+                comp_total_time_str = format_stat(r['TimeTotalCompiled'], prec=4)
+                comp_entry_time_str = format_stat(r['TimeEntryCompiled'], prec=6)
                 mem_comp_str = format_stat(r['MemoryCompiled'], prec=3)
                 speedup = "--"
                 mem_reduction = "--"
-                t_uncomp = get_mean(r['Time'])
-                t_comp = get_mean(r['TimeCompiled'])
+                t_uncomp = get_mean(r['TimeTotal'])
+                t_comp = get_mean(r['TimeTotalCompiled'])
                 if isinstance(t_uncomp, (float, int)) and isinstance(t_comp, (float, int)) and t_comp > 0:
                     speedup = f"{t_uncomp / t_comp:.2f}x"
 
@@ -530,11 +567,11 @@ def main():
                 if isinstance(m_uncomp, (float, int)) and isinstance(m_comp, (float, int)) and m_comp > 0 and m_uncomp > 0:
                     mem_reduction = f"{m_uncomp / m_comp:.2f}x"
 
-                print(f"| {plat_display:<{platform_width}} | {r['Format']:<6} | {r['Precision']:<4} | {time_str:<26} | {mem_str:<16} | {time_comp_str:<26} | {mem_comp_str:<16} | {speedup:<8} | {mem_reduction:<10} |")
+                print(f"| {plat_display:<{platform_width}} | {r['Format']:<6} | {r['Precision']:<4} | {total_time_str:<22} | {entry_time_str:<22} | {mem_str:<14} | {comp_total_time_str:<22} | {comp_entry_time_str:<22} | {mem_comp_str:<14} | {speedup:<8} | {mem_reduction:<10} |")
             else:
-                print(f"| {plat_display:<{platform_width}} | {r['Format']:<6} | {r['Precision']:<4} | {time_str:<26} | {mem_str:<16} | {'N/A':<26} | {'N/A':<16} | {'--':<8} | {'--':<10} |")
+                print(f"| {plat_display:<{platform_width}} | {r['Format']:<6} | {r['Precision']:<4} | {total_time_str:<22} | {entry_time_str:<22} | {mem_str:<14} | {'N/A':<22} | {'N/A':<22} | {'N/A':<14} | {'--':<8} | {'--':<10} |")
         else:
-            print(f"| {plat_display:<{platform_width}} | {r['Format']:<6} | {r['Precision']:<4} | {time_str:<28} | {mem_str:<16} |")
+            print(f"| {plat_display:<{platform_width}} | {r['Format']:<6} | {r['Precision']:<4} | {total_time_str:<24} | {entry_time_str:<24} | {mem_str:<16} |")
 
         current_platform = r['Platform']
 
