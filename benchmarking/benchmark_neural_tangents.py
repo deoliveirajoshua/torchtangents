@@ -21,8 +21,6 @@ warnings.filterwarnings('ignore', category=FutureWarning)
 logging.getLogger("tensorflow").setLevel(logging.ERROR)
 
 import jax
-# Enable 64-bit precision in JAX upfront
-jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import neural_tangents.stax as jax_stax
 import argparse

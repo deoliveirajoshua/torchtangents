@@ -544,7 +544,8 @@ def _inputs_to_kernel(
     x = _get_masked_array(x, mask_constant)
     x, mask = x.masked_value, x.mask
 
-    x = x.to(torch.float64)
+    if not x.is_floating_point():
+      x = x.to(torch.get_default_dtype())
 
     if diagonal_batch:
       cov = _cov_diag_batch(x, diagonal_spatial, batch_axis, channel_axis)
@@ -554,13 +555,21 @@ def _inputs_to_kernel(
     return x, cov, mask
 
   x1, cov1, mask1 = get_x_cov_mask(x1)
-  x2, cov2, mask2 = get_x_cov_mask(x2)
+  if x2 is None:
+    x2, cov2, mask2 = None, None, None
+    x1_is_x2 = True
+  elif utils.x1_is_x2(x1, x2, eps=eps):
+    x2, cov2, mask2 = x1, cov1, mask1
+    x1_is_x2 = True
+  else:
+    x2, cov2, mask2 = get_x_cov_mask(x2)
+    x1_is_x2 = False
   nngp = _cov(x1, x2, diagonal_spatial, batch_axis, channel_axis)
 
   ntk = torch.zeros_like(nngp) if compute_ntk else None
   is_gaussian = False
   is_reversed = False
-  x1_is_x2 = utils.x1_is_x2(x1, x2, eps=eps)
+  pass
   is_input = False
 
   return Kernel(
@@ -710,7 +719,11 @@ def _set_shapes(
       if isinstance(k_obj, Kernel):
           def get_actual_shape(s):
               return s.shape if hasattr(s, 'shape') else tuple(s)
-          return k_obj.replace(shape1=get_actual_shape(s1_obj), shape2=get_actual_shape(s2_obj))
+          new_s1 = get_actual_shape(s1_obj)
+          new_s2 = get_actual_shape(s2_obj)
+          if k_obj.shape1 == new_s1 and k_obj.shape2 == new_s2:
+              return k_obj
+          return k_obj.replace(shape1=new_s1, shape2=new_s2)
       if hasattr(k_obj, 'items'):
           return {key: _set_shape_map(k_obj[key], s1_obj[key], s2_obj[key]) for key in k_obj.keys()}
       if isinstance(k_obj, (list, tuple)):
@@ -857,10 +870,10 @@ def get_diagonal_outer_prods(
   axis = utils.canonicalize_axis(axis, cov1)
 
   cov1 = get_diagonal(cov1, diagonal_batch, diagonal_spatial)
-  cov2 = get_diagonal(cov2, diagonal_batch, diagonal_spatial)
+  cov2 = cov1 if (cov2 is None or cov2 is cov1) else get_diagonal(cov2, diagonal_batch, diagonal_spatial)
 
   cov1, _ = mean_and_var(cov1, axis=axis, keepdims=True, mask=mask1)
-  cov2, _ = mean_and_var(cov2, axis=axis, keepdims=True, mask=mask2)
+  cov2, _ = (cov1, None) if (cov2 is cov1 and (mask2 is mask1 or mask2 is None)) else mean_and_var(cov2, axis=axis, keepdims=True, mask=mask2)
 
   if cov1 is None:
     raise ValueError('cov1 is None')
@@ -870,7 +883,7 @@ def get_diagonal_outer_prods(
   start_axis = 1 if diagonal_batch else 0
   prod11 = utils.outer_prod(cov1, cov1, start_axis, end_axis, operation)
   prod22 = (utils.outer_prod(cov2, cov2, start_axis, end_axis, operation)
-            if cov2 is not None else prod11)
+            if (cov2 is not None and cov2 is not cov1) else prod11)
 
   return prod11, prod12, prod22
 

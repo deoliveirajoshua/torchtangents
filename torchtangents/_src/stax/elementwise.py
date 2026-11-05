@@ -32,15 +32,17 @@ from .requirements import supports_masking
 
 
 def _sqrt(x: torch.Tensor, tol: float = 0.) -> torch.Tensor:
-  safe_x = torch.where(x > tol, x, torch.ones_like(x))
-  return torch.where(x > tol, torch.sqrt(safe_x), torch.full_like(x, math.sqrt(tol)))
+  safe_x = torch.where(x > tol, x, 1.0)
+  res = torch.sqrt(safe_x)
+  return torch.where(x > tol, res, math.sqrt(tol) if tol > 0 else 0.0)
+
 
 
 def _arctan2(x: torch.Tensor, y: torch.Tensor, fill_zero: Optional[float] = None) -> torch.Tensor:
   if fill_zero is not None:
     mask = (x == 0.) & (y == 0.)
     res = torch.atan2(x, y)
-    return torch.where(mask, torch.tensor(fill_zero, dtype=res.dtype, device=res.device), res)
+    return torch.where(mask, float(fill_zero), res)
   return torch.atan2(x, y)
 
 
@@ -273,11 +275,11 @@ def RectifiedMonomial(degree: int) -> InternalLayer:
     if k.diagonal_batch and k.diagonal_spatial:
       cov1 = nngp_fn_diag(cov1)
       if cov2 is not None:
-        cov2 = nngp_fn_diag(cov2)
+        cov2 = cov1 if (cov2 is cov1 or k.x1_is_x2) else nngp_fn_diag(cov2)
     else:
       cov1, _ = nngp_ntk_fn(cov1, prod11)
       if cov2 is not None:
-        cov2, _ = nngp_ntk_fn(cov2, prod22)
+        cov2, _ = (cov1, None) if (cov2 is cov1 or k.x1_is_x2) else nngp_ntk_fn(cov2, prod22)
 
     return k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk)
 
@@ -331,11 +333,11 @@ def ABRelu(
     if k.diagonal_batch and k.diagonal_spatial:
       cov1 = nngp_fn_diag(cov1)
       if cov2 is not None:
-        cov2 = nngp_fn_diag(cov2)
+        cov2 = cov1 if (cov2 is cov1 or k.x1_is_x2) else nngp_fn_diag(cov2)
     else:
       cov1, _ = nngp_ntk_fn(cov1, prod11)
       if cov2 is not None:
-        cov2, _ = nngp_ntk_fn(cov2, prod22)
+        cov2, _ = (cov1, None) if (cov2 is cov1 or k.x1_is_x2) else nngp_ntk_fn(cov2, prod22)
 
     if do_stabilize:
       nngp = nngp * factor
@@ -486,7 +488,7 @@ def Gabor() -> InternalLayer:
     if k.diagonal_batch and k.diagonal_spatial:
       cov1 = nngp_fn_diag(cov1)
       if cov2 is not None:
-        cov2 = nngp_fn_diag(cov2)
+        cov2 = cov1 if (cov2 is cov1 or k.x1_is_x2) else nngp_fn_diag(cov2)
     else:
       cov1, _ = nngp_ntk_fn(cov1, prod11, sum11)
       if cov2 is not None:
@@ -545,7 +547,7 @@ def GeLU(approximate: bool = False) -> InternalLayer:
     if k.diagonal_batch and k.diagonal_spatial:
       cov1 = nngp_fn_diag(cov1)
       if cov2 is not None:
-        cov2 = nngp_fn_diag(cov2)
+        cov2 = cov1 if (cov2 is cov1 or k.x1_is_x2) else nngp_fn_diag(cov2)
     else:
       cov1, _ = nngp_ntk_fn(cov1, prod11, prod11_plus_1)
       if cov2 is not None:
@@ -584,7 +586,7 @@ def Sin(a: float = 1., b: float = 1., c: float = 0.) -> InternalLayer:
     if k.diagonal_batch and k.diagonal_spatial:
       cov1 = nngp_fn_diag(cov1)
       if cov2 is not None:
-        cov2 = nngp_fn_diag(cov2)
+        cov2 = cov1 if (cov2 is cov1 or k.x1_is_x2) else nngp_fn_diag(cov2)
     else:
       cov1, _ = nngp_ntk_fn(cov1, sum11)
       if cov2 is not None:
@@ -626,7 +628,7 @@ def Rbf(gamma: float = 1.0) -> InternalLayer:
     if k.diagonal_batch and k.diagonal_spatial:
       cov1 = nngp_fn_diag(cov1)
       if cov2 is not None:
-        cov2 = nngp_fn_diag(cov2)
+        cov2 = cov1 if (cov2 is cov1 or k.x1_is_x2) else nngp_fn_diag(cov2)
     else:
       cov1, _ = nngp_ntk_fn(cov1, sum11, None)
       if cov2 is not None:
@@ -685,7 +687,7 @@ def Exp(a: float = 1, b: float = 1) -> InternalLayer:
     if k.diagonal_batch and k.diagonal_spatial:
       cov1 = nngp_fn_diag(cov1)
       if cov2 is not None:
-        cov2 = nngp_fn_diag(cov2)
+        cov2 = cov1 if (cov2 is cov1 or k.x1_is_x2) else nngp_fn_diag(cov2)
     else:
       cov1, _ = nngp_ntk_fn(cov1, sum11, None)
       if cov2 is not None:
@@ -734,11 +736,11 @@ def Gaussian(a: float = 1, b: float = -1) -> InternalLayer:
     if k.diagonal_batch and k.diagonal_spatial:
       cov1 = nngp_fn_diag(cov1)
       if cov2 is not None:
-        cov2 = nngp_fn_diag(cov2)
+        cov2 = cov1 if (cov2 is cov1 or k.x1_is_x2) else nngp_fn_diag(cov2)
     else:
       cov1, _ = nngp_ntk_fn(cov1, prod11)
       if cov2 is not None:
-        cov2, _ = nngp_ntk_fn(cov2, prod22)
+        cov2, _ = (cov1, None) if (cov2 is cov1 or k.x1_is_x2) else nngp_ntk_fn(cov2, prod22)
 
     if cov1 is not None: cov1 = cov1 * (a ** 2)
     if cov2 is not None: cov2 = cov2 * (a ** 2)
@@ -852,8 +854,8 @@ def Monomial(degree: int) -> InternalLayer:
           nngp = torch.zeros_like(nngp)
         elif degree == 0:
           nngp = torch.ones_like(nngp)
-        elif degree == 1:
-          pass
+        elif degree == 1: pass
+        
         elif degree == 2:
           nngp = 2 * nngp ** 2 + prod
         elif degree == 3:
@@ -882,11 +884,11 @@ def Monomial(degree: int) -> InternalLayer:
     if k.diagonal_batch and k.diagonal_spatial:
       cov1 = nngp_fn_diag(cov1)
       if cov2 is not None:
-        cov2 = nngp_fn_diag(cov2)
+        cov2 = cov1 if (cov2 is cov1 or k.x1_is_x2) else nngp_fn_diag(cov2)
     else:
       cov1, _ = nngp_ntk_fn(cov1, prod11)
       if cov2 is not None:
-        cov2, _ = nngp_ntk_fn(cov2, prod22)
+        cov2, _ = (cov1, None) if (cov2 is cov1 or k.x1_is_x2) else nngp_ntk_fn(cov2, prod22)
 
     k = k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk)
     return k

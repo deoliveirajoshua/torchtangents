@@ -92,14 +92,11 @@ class Kernel(torch.Tensor):
         self.cov1 = cov1 if cov1 is not None else self._raw
         self.cov2 = cov2
         
-        # Value-level metadata can be tensors to avoid recompiles for identical math
-        dev = self._raw.device
-        self.x1_is_x2 = torch.as_tensor(x1_is_x2 if x1_is_x2 is not None else True, device=dev)
-        self.is_gaussian = torch.as_tensor(is_gaussian, device=dev)
-        self.is_input = torch.as_tensor(is_input, device=dev)
-        
         # Structural metadata must be Python objects to avoid graph breaks 
-        # during structural branching (e.g. Diagonal vs Full spatial modes)
+        # during structural branching
+        self.x1_is_x2 = bool(x1_is_x2.item() if isinstance(x1_is_x2, torch.Tensor) else (True if x1_is_x2 is None else x1_is_x2))
+        self.is_gaussian = bool(is_gaussian.item() if isinstance(is_gaussian, torch.Tensor) else is_gaussian)
+        self.is_input = bool(is_input.item() if isinstance(is_input, torch.Tensor) else is_input)
         self.diagonal_batch = bool(diagonal_batch)
         self.diagonal_spatial = bool(diagonal_spatial)
         self.is_reversed = bool(is_reversed)
@@ -609,17 +606,11 @@ def _kernel_flatten(obj: Kernel):
     # Data components (children) that are Tensors
     children = [obj._raw, obj.ntk, obj.cov1, obj.cov2]
     
-    # Track which optional fields are tensors
-    tensor_fields = []
-    for field in ('x1_is_x2', 'is_gaussian', 'is_input'):
-        val = getattr(obj, field)
-        if isinstance(val, torch.Tensor):
-            children.append(val)
-            tensor_fields.append(field)
-    
     # Static metadata (context)
     metadata = {
-        'tensor_fields': tuple(tensor_fields),
+        'x1_is_x2': obj.x1_is_x2,
+        'is_gaussian': obj.is_gaussian,
+        'is_input': obj.is_input,
         'diagonal_batch': obj.diagonal_batch,
         'diagonal_spatial': obj.diagonal_spatial,
         'is_reversed': obj.is_reversed,
@@ -631,33 +622,11 @@ def _kernel_flatten(obj: Kernel):
         'mask1': obj.mask1,
         'mask2': obj.mask2,
     }
-    
-    # Add non-tensor versions of optional fields to metadata
-    for field in ('x1_is_x2', 'is_gaussian', 'is_input'):
-        if field not in tensor_fields:
-            metadata[field] = getattr(obj, field)
-            
     return children, metadata
 
 def _kernel_unflatten(children: list[torch.Tensor], metadata: dict) -> Kernel:
     """Reconstructs a Kernel from flattened children and context."""
     nngp, ntk, cov1, cov2 = children[:4]
-    
-    # Reconstruct optional fields (tensors or static)
-    kwargs = {}
-    tensor_idx = 4
-    for field in ('x1_is_x2', 'is_gaussian', 'is_input'):
-        if field in metadata['tensor_fields']:
-            kwargs[field] = children[tensor_idx]
-            tensor_idx += 1
-        else:
-            kwargs[field] = metadata[field]
-            
-    # Add remaining metadata
-    for k, v in metadata.items():
-        if k not in kwargs and k != 'tensor_fields':
-            kwargs[k] = v
-            
-    return Kernel(nngp=nngp, ntk=ntk, cov1=cov1, cov2=cov2, **kwargs)
+    return Kernel(nngp=nngp, ntk=ntk, cov1=cov1, cov2=cov2, **metadata)
 
 pytree.register_pytree_node(Kernel, _kernel_flatten, _kernel_unflatten)

@@ -34,12 +34,25 @@ from .requirements import requires
 from .requirements import supports_masking
 
 
+_EYE_FILTER_CACHE = {}
+
+def _get_identity_filter(K: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    key = (K, str(device), str(dtype))
+    w = _EYE_FILTER_CACHE.get(key)
+    if w is None or w.device != device or w.dtype != dtype:
+        w = torch.eye(K, device=device, dtype=dtype).view(1, 1, K, K) / K
+        _EYE_FILTER_CACHE[key] = w
+    return w
+
+
 def _affine(
     mat: Optional[torch.Tensor],
     W_std: float,
     b_std: Optional[float],
 ) -> Optional[torch.Tensor]:
   if mat is not None:
+    if W_std == 1.0 and (b_std is None or b_std == 0.0):
+      return mat
     mat = mat * (W_std ** 2)
 
     if b_std is not None:
@@ -234,16 +247,20 @@ def Linear(
       return _affine(x, W_std, b_std)
 
     if parameterization == 'ntk':
-      cov1, nngp, cov2 = map(fc, (cov1, nngp, cov2))
+      cov1 = fc(cov1)
+      nngp = fc(nngp)
+      cov2 = cov1 if (cov2 is cov1 or cov2 is None) else fc(cov2)
       if ntk is not None:
-        ntk = nngp + W_std**2 * ntk
+        ntk = (nngp + ntk) if W_std == 1.0 else (nngp + W_std**2 * ntk)
     elif parameterization == 'standard':
       input_width = k.shape1[channel_axis] / s[0]
       if ntk is not None:
         ntk = input_width * nngp + W_std**2 * ntk
         if b_std is not None:
           ntk = ntk + 1.
-      cov1, nngp, cov2 = map(fc, (cov1, nngp, cov2))
+      cov1 = fc(cov1)
+      nngp = fc(nngp)
+      cov2 = cov1 if (cov2 is cov1 or cov2 is None) else fc(cov2)
 
     return k.replace(cov1=cov1,
                      nngp=nngp,
@@ -350,8 +367,7 @@ def Dropout(rate: float, mode: str = 'train') -> InternalLayer:
     cov1 = _diag_mul(cov1, factor, k.diagonal_batch, k.diagonal_spatial)
     cov2 = _diag_mul(cov2, factor, k.diagonal_batch, k.diagonal_spatial)
 
-    new_factor = torch.where(k.x1_is_x2, torch.as_tensor(factor, device=k.device, dtype=k.dtype), 
-                             torch.as_tensor(1.0, device=k.device, dtype=k.dtype))
+    new_factor = factor if k.x1_is_x2 else 1.0
     
     nngp = _diag_mul(nngp, new_factor, False, k.diagonal_spatial)
     ntk = _diag_mul(ntk, new_factor, False, k.diagonal_spatial)
@@ -699,11 +715,11 @@ def _Conv(
                   padding_tuple = (pad_val2 // 2, pad_val2 - pad_val2 // 2, pad_val1 // 2, pad_val1 - pad_val1 // 2)
                   x = pad(x, padding_tuple, mode='circular' if padding == Padding.CIRCULAR else 'constant')
               
-              w = torch.eye(K, device=x.device, dtype=x.dtype).view(1, 1, K, K) / K
+              w = _get_identity_filter(K, x.device, x.dtype)
               x = conv2d(x, w, stride=(S, S))
           else:
               # Transpose
-              w = torch.eye(K, device=x.device, dtype=x.dtype).view(1, 1, K, K) / K
+              w = _get_identity_filter(K, x.device, x.dtype)
               x = conv_transpose2d(x, w, stride=(S, S), padding=0)
               
               if padding == Padding.SAME:
@@ -718,8 +734,9 @@ def _Conv(
 
     def affine(out, scale, shift, b_ndim):
       if out is not None:
-        out = out * scale
-        if shift is not None:
+        if scale != 1.0:
+          out = out * scale
+        if shift is not None and shift != 0.0:
           out = out + shift
       return out
       
@@ -730,12 +747,12 @@ def _Conv(
 
     cov1 = conv(cov1, 1 if k.diagonal_batch else 2)
     if cov2 is not None:
-      cov2 = conv(cov2, 1 if k.diagonal_batch else 2)
+      cov2 = cov1 if (cov2 is cov1 or k.x1_is_x2) else conv(cov2, 1 if k.diagonal_batch else 2)
     
     if parameterization == 'ntk':
       nngp = conv(nngp, 2)
       if ntk is not None:
-        ntk = W_std**2 * conv_unscaled(ntk, 2) + nngp
+        ntk = (conv_unscaled(ntk, 2) + nngp) if W_std == 1.0 else (W_std**2 * conv_unscaled(ntk, 2) + nngp)
     elif parameterization == 'standard':
       nngp_unscaled = conv_unscaled(nngp, 2)
       if ntk is not None:
