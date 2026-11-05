@@ -141,11 +141,6 @@ def wraps(f):
 
     if hasattr(f, "__signature__"):
       setattr(h, "__signature__", getattr(f, "__signature__"))
-    else:
-      try:
-          setattr(h, "__signature__", inspect.signature(f))
-      except ValueError:
-          pass
     return h
   return wrapper
 

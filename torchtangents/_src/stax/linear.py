@@ -14,11 +14,15 @@
 
 import functools
 import operator as op
+import operator
+import math
+import string
 from typing import Any, Callable, Iterable, Optional, Sequence, Union
 import warnings
 
 import enum
 import torch
+from torch.nn.functional import avg_pool1d, avg_pool2d, avg_pool3d, pad, conv2d, conv_transpose2d
 import numpy as np
 
 from ..utils import utils
@@ -32,6 +36,8 @@ from .requirements import Diagonal
 from .requirements import layer
 from .requirements import requires
 from .requirements import supports_masking
+from .requirements import get_diagonal
+from . import requirements as req
 
 
 _EYE_FILTER_CACHE = {}
@@ -190,6 +196,8 @@ def Linear(
     _channel_axis = channel_axis % len(input_shape)
     output_shape = (input_shape[:_channel_axis] + (out_dim,)
                     + input_shape[_channel_axis + 1:])
+    if rng is None:
+      return output_shape, (None, None)
     W = torch.randn(input_shape[_channel_axis], out_dim, generator=rng)
 
     if b_std is None:
@@ -461,7 +469,6 @@ def _Conv(
     if len(spatial_axes) != len(filter_shape):
         raise ValueError(f"Filter shape {filter_shape} does not match spatial dimensions {len(spatial_axes)}")
 
-    import math
     out_shape = list(input_shape)
     
     for i, ax in enumerate(spatial_axes):
@@ -488,11 +495,16 @@ def _Conv(
       W_shape = (out_spatial_size,) + W_shape
 
     if parameterization == 'ntk':
+      out_shape[_channel_axis] = out_chan
+      if rng is None:
+        return tuple(out_shape), (None, None)
       W = torch.randn(W_shape, generator=rng)
       b = None if b_std is None else torch.randn((out_chan,), generator=rng)
-      out_shape[_channel_axis] = out_chan
     elif parameterization == 'standard':
       curr_out_chan = out_chan * s[1]
+      out_shape[_channel_axis] = curr_out_chan
+      if rng is None:
+        return tuple(out_shape), (None, None)
       if not transpose:
         W_shape_s = (curr_out_chan, in_chan * s[0]) + tuple(filter_shape)
       else:
@@ -506,7 +518,6 @@ def _Conv(
       fan_in = in_chan * math.prod(filter_shape)
       W = W * (W_std / (fan_in / s[0])**0.5)
       b = None if b_std is None else torch.randn((curr_out_chan,), generator=rng) * b_std
-      out_shape[_channel_axis] = curr_out_chan
     else:
       raise ValueError(f'Parameterization not supported: {parameterization}')
 
@@ -515,7 +526,6 @@ def _Conv(
   def apply_fn(params, inputs, **kwargs):
     W, b = params
     in_chan = inputs.shape[channel_axis]
-    import math
     
     if parameterization == 'ntk':
       fan_in = in_chan * math.prod(filter_shape)
@@ -620,12 +630,10 @@ def _Conv(
             channel_axis=channel_axis,
             diagonal_spatial=Diagonal(output=Bool.NO if shared_weights else Bool.YES))
   def kernel_fn(k: Kernel, **kwargs):
-    import math
     cov1, nngp, cov2, ntk = k.cov1, k.nngp, k.cov2, k.ntk
     is_reversed = k.is_reversed
 
     if not shared_weights and not k.diagonal_spatial:
-        from .requirements import get_diagonal
         nngp = get_diagonal(nngp, False, False)
         if ntk is not None:
             ntk = get_diagonal(ntk, False, False)
@@ -666,7 +674,6 @@ def _Conv(
           cur_strides = cur_strides[::-1]
 
       if k.diagonal_spatial:
-        from torch.nn.functional import avg_pool1d, avg_pool2d, avg_pool3d, pad
         sp_axes_len = (ndim - b_ndim)
         
         flat_b = math.prod(mat.shape[:b_ndim])
@@ -693,7 +700,6 @@ def _Conv(
         
         return out.reshape(mat.shape[:b_ndim] + out.shape[2:])
       else:
-        from torch.nn.functional import conv2d, pad, conv_transpose2d
         out = mat
         for i in range(ndim - 1, b_ndim, -2):
           sp_i = (i - b_ndim) // 2
@@ -919,6 +925,8 @@ def GlobalSelfAttention(
     _channel_axis = channel_axis % len(input_shape)
     output_shape = (input_shape[:_channel_axis] + (n_chan_out,) +
                     input_shape[_channel_axis + 1:])
+    if rng is None:
+      return tuple(output_shape), (None, None, None, None, None, None)
 
     n_chan_in_keys = n_chan_in_vals = input_shape[channel_axis]
 
@@ -1139,7 +1147,6 @@ def GlobalSelfAttention(
             res_dims = (0, -1) + res_dims
 
           def make_einsum_equation(*dim_lists):
-             import string
              alphabet = string.ascii_letters
              all_dims = []
              for lst in dim_lists:
@@ -1420,8 +1427,6 @@ def Aggregate(
 
   def make_indices(index_array, agg_shape):
     index_array = torch.movedim(index_array, -1, 0)
-    import functools
-    import operator
     strides = [1] * len(agg_shape)
     for i in range(len(agg_shape)-2, -1, -1):
         strides[i] = strides[i+1] * agg_shape[i+1]
@@ -1469,7 +1474,6 @@ def Aggregate(
       pattern = to_dense(pattern)
       
       # torch.einsum instead of lax.dot_general
-      import string
       alphabet = string.ascii_letters
       lhs_chars = list(alphabet[:ndim])
       rhs_chars = []
@@ -1499,8 +1503,6 @@ def Aggregate(
 
       inputs = torch.movedim(inputs, src_axes, dst_axes)
       input_shape = inputs.shape
-      import functools
-      import operator
       inputs = inputs.reshape((inputs.shape[0],
                                functools.reduce(
                                    operator.mul, inputs.shape[1:agg_ndim + 1], 1))
@@ -1546,8 +1548,6 @@ def Aggregate(
     agg_axes, batch_axis_in, channel_axis_in = get_agg_axes(ndim)
     agg_ndim = len(agg_axes)
     agg_shape = tuple(k.shape1[a] for a in agg_axes)
-    import functools
-    import operator
     agg_size = functools.reduce(operator.mul, agg_shape, 1)
 
     def bucket_axes(ndim, start_axis):
@@ -1576,7 +1576,6 @@ def Aggregate(
         start_axis = 1 if diagonal_batch else 2
         mat = utils.unzip_axes(mat, start_axis)
         b, agg_1, agg_2, non_agg_1, non_agg_2 = bucket_axes(mat.ndim, start_axis)
-        import numpy as np
         permutation = b + non_agg_1 + agg_1 + non_agg_2 + agg_2
         mat = torch.permute(mat, tuple(np.argsort(permutation).tolist()))
         return utils.zip_axes(mat, start_axis)
@@ -1661,7 +1660,6 @@ def LayerNorm(
     batch_axis: int = 0,
     channel_axis: int = 1, # in pytorch conv, channel is the second dimension, in neural-tangents, it's the last dimension
 ) -> InternalLayer:
-  from . import requirements as req
   def init_fn(rng, input_shape):
     return input_shape, ()
 
@@ -1723,7 +1721,6 @@ def LayerNorm(
 
       return m
 
-    import operator as op
     prod11, prod12, prod22 = req.get_diagonal_outer_prods(
         eps + cov1,
         cov2 if cov2 is None else eps + cov2,

@@ -17,6 +17,7 @@ from typing import Any, Callable
 import warnings
 
 import torch
+from torch.utils._pytree import tree_flatten, tree_unflatten
 
 from ..utils.kernel import Kernel
 from ..utils.typing import InternalLayer
@@ -109,7 +110,6 @@ def repeat(layer_tuple: Layer, n: int) -> InternalLayer:
             return None
         return tuple(xs)
 
-    from torch.utils._pytree import tree_flatten, tree_unflatten
     flat_trees, specs = zip(*[tree_flatten(t) for t in params_list])
     spec = specs[0]
     stacked_leaves = [stack_if_tensor(*leaves) for leaves in zip(*flat_trees)]

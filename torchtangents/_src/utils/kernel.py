@@ -52,21 +52,17 @@ def _combine_kernels_sum(k1: 'Kernel', k2: 'Kernel') -> 'Kernel':
         )
 
 
-class Kernel(torch.Tensor):
+class Kernel:
     """
     Kernel object representing NNGP and NTK matrices.
-    Stored as a torch.Tensor subclass to allow native integration
-    with PyTorch operations and transformations.
-    
-    The base tensor (self) corresponds to the NNGP matrix.
+    The base tensor (self._raw / self.nngp) corresponds to the NNGP matrix.
     """
     
-    @staticmethod
-    def __new__(cls, nngp, ntk=None, cov1=None, cov2=None, x1_is_x2=None, 
-                is_gaussian=False, is_reversed=False, is_input=False,
-                diagonal_batch=False, diagonal_spatial=False,
-                shape1=None, shape2=None, batch_axis=0, channel_axis=1,
-                is_height_aware=False, mask1=None, mask2=None):
+    def __init__(self, nngp, ntk=None, cov1=None, cov2=None, x1_is_x2=None, 
+                 is_gaussian=False, is_reversed=False, is_input=False,
+                 diagonal_batch=False, diagonal_spatial=False,
+                 shape1=None, shape2=None, batch_axis=0, channel_axis=1,
+                 is_height_aware=False, mask1=None, mask2=None):
         if isinstance(nngp, Kernel):
             nngp = nngp._raw
         
@@ -79,15 +75,7 @@ class Kernel(torch.Tensor):
             else:
                 nngp = torch.as_tensor(nngp)  # Defaults to CPU if nothing else is provided
             
-        instance = torch.Tensor._make_subclass(cls, nngp, nngp.requires_grad)
-        instance._raw = nngp
-        return instance
-
-    def __init__(self, nngp, ntk=None, cov1=None, cov2=None, x1_is_x2=None, 
-                 is_gaussian=False, is_reversed=False, is_input=False,
-                 diagonal_batch=False, diagonal_spatial=False,
-                 shape1=None, shape2=None, batch_axis=0, channel_axis=1,
-                 is_height_aware=False, mask1=None, mask2=None):
+        self._raw = nngp
         self.ntk = ntk
         self.cov1 = cov1 if cov1 is not None else self._raw
         self.cov2 = cov2
@@ -114,6 +102,106 @@ class Kernel(torch.Tensor):
     @property
     def nngp(self) -> torch.Tensor:
         return self._raw
+
+    @property
+    def device(self) -> torch.device:
+        return self._raw.device
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return self._raw.dtype
+
+    @property
+    def shape(self) -> torch.Size:
+        return self._raw.shape
+
+    @property
+    def ndim(self) -> int:
+        return self._raw.ndim
+
+    def size(self, dim=None):
+        if self.shape1 is not None:
+            s = torch.Size(self.shape1)
+        else:
+            s = self._raw.shape
+        return s if dim is None else s[dim]
+
+    def dim(self) -> int:
+        return len(self.shape1) if self.shape1 is not None else self._raw.ndim
+
+    def numel(self) -> int:
+        return math.prod(self.shape1) if self.shape1 is not None else self._raw.numel()
+
+    def __getattr__(self, name: str):
+        if name == '_raw' or '_raw' not in self.__dict__:
+            raise AttributeError(name)
+        try:
+            return getattr(self._raw, name)
+        except AttributeError:
+            raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+
+    @property
+    def requires_grad(self) -> bool:
+        return self._raw.requires_grad
+
+    def __len__(self) -> int:
+        return len(self._raw)
+
+    def __repr__(self) -> str:
+        return f"Kernel(nngp={self._raw}, ntk={self.ntk}, cov1={self.cov1}, cov2={self.cov2})"
+
+    def to(self, *args, **kwargs) -> 'Kernel':
+        return self.replace(
+            nngp=self._raw.to(*args, **kwargs),
+            ntk=self.ntk.to(*args, **kwargs) if self.ntk is not None else None,
+            cov1=self.cov1.to(*args, **kwargs) if self.cov1 is not None else None,
+            cov2=self.cov2.to(*args, **kwargs) if self.cov2 is not None else None,
+        )
+
+    def cpu(self) -> 'Kernel':
+        return self.to('cpu')
+
+    def cuda(self, device=None) -> 'Kernel':
+        return self.to(f'cuda:{device}' if device is not None else 'cuda')
+
+    def clone(self) -> 'Kernel':
+        return self.replace(
+            nngp=self._raw.clone(),
+            ntk=self.ntk.clone() if self.ntk is not None else None,
+            cov1=self.cov1.clone() if self.cov1 is not None else None,
+            cov2=self.cov2.clone() if self.cov2 is not None else None,
+        )
+
+    def detach(self) -> 'Kernel':
+        return self.replace(
+            nngp=self._raw.detach(),
+            ntk=self.ntk.detach() if self.ntk is not None else None,
+            cov1=self.cov1.detach() if self.cov1 is not None else None,
+            cov2=self.cov2.detach() if self.cov2 is not None else None,
+        )
+
+    def __add__(self, other):
+        if isinstance(other, Kernel):
+            return _combine_kernels_sum(self, other)
+        return self.replace(nngp=self._raw + other)
+
+    def __radd__(self, other):
+        return self.__add__(other)
+
+    def __mul__(self, other):
+        if isinstance(other, Kernel):
+            from ... import stax as _stax
+            return _stax.FanInProd()([self, other])
+        var = other**2 if isinstance(other, (int, float)) else other
+        return self.replace(
+            nngp=self._raw * var,
+            ntk=self.ntk * var if self.ntk is not None else None,
+            cov1=self.cov1 * var,
+            cov2=self.cov2 * var if self.cov2 is not None else None
+        )
+
+    def __rmul__(self, other):
+        return self.__mul__(other)
 
     @classmethod
     def from_inputs(
@@ -386,39 +474,11 @@ class Kernel(torch.Tensor):
             if isinstance(tensors, (list, tuple)) and any(isinstance(t, Kernel) for t in tensors):
                 return _stax.FanInConcat(axis=dim)(list(tensors))
 
-        return super().__torch_function__(func, types, args, kwargs)
+        if func in (torch.clone, torch.Tensor.clone):
+            return args[0].clone()
 
-    @classmethod
-    def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
-        if kwargs is None: kwargs = {}
-        
-        if func == torch.ops.aten.getitem.default:
-            return args[0].__getitem__(args[1])
-            
-        if func in (torch.ops.aten.clone.default, torch.ops.aten.detach.default):
-            self = args[0]
-            def op_wrap(t):
-                if t is None: return None
-                if isinstance(t, Kernel): return func(t._raw, **kwargs)
-                return func(t, **kwargs) if isinstance(t, torch.Tensor) else t
-            return self.replace(
-                nngp=op_wrap(self),
-                ntk=op_wrap(self.ntk),
-                cov1=op_wrap(self.cov1),
-                cov2=op_wrap(self.cov2),
-                x1_is_x2=op_wrap(self.x1_is_x2) if isinstance(self.x1_is_x2, torch.Tensor) else self.x1_is_x2,
-                mask1=op_wrap(self.mask1),
-                mask2=op_wrap(self.mask2)
-            )
-
-        if func in (torch.ops.aten.mul.Tensor, torch.ops.aten.mul.Scalar):
-            if isinstance(args[0], Kernel) and len(args) > 1 and isinstance(args[1], (int, float)):
-                self, val = args[0], args[1]
-                var = val**2
-                return self.replace(
-                    nngp=self._raw * var, ntk=self.ntk * var if self.ntk is not None else None,
-                    cov1=self.cov1 * var, cov2=self.cov2 * var if self.cov2 is not None else None
-                )
+        if func in (torch.detach, torch.Tensor.detach):
+            return args[0].detach()
 
         def unwrap(x):
             if isinstance(x, Kernel): return x._raw
@@ -426,7 +486,7 @@ class Kernel(torch.Tensor):
             if isinstance(x, dict): return {k: unwrap(v) for k, v in x.items()}
             return x
 
-        return func(*unwrap(args), **unwrap(kwargs))
+        return func(*unwrap(args), **unwrap(kwargs or {}))
 
     # Helper methods
     def slice(self, n1_slice, n2_slice): return self.__getitem__((n1_slice, n2_slice))

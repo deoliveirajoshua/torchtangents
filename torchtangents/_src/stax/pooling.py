@@ -1,4 +1,5 @@
 import torch
+from torch.nn.functional import avg_pool1d, avg_pool2d, avg_pool3d, pad
 from ..utils import utils
 from ..utils.kernel import Kernel
 from ..utils.typing import InternalLayerMasked
@@ -148,7 +149,6 @@ def _Pool(
   strides = strides or (1,) * len(window_shape)
 
   def _same_pad_for_filter_shape(x, window_shape, strides, spatial_axes, value=0.0):
-      from torch.nn.functional import pad
       padding_tuple = []
       axes_list = list(spatial_axes)
       for i in range(x.ndim-1, -1, -1):
@@ -188,7 +188,6 @@ def _Pool(
       if padding == 'SAME':
           x = _same_pad_for_filter_shape(x, window_shape, strides, sp_axes)
 
-      from torch.nn.functional import avg_pool1d, avg_pool2d, avg_pool3d
       pool_dict = {1: avg_pool1d, 2: avg_pool2d, 3: avg_pool3d}
       
       old_batch = batch_axis % inputs.ndim
@@ -258,7 +257,6 @@ def _Pool(
               
               return res.reshape(mat.shape[:b_ndim] + res.shape[2:])
           else:
-              from torch.nn.functional import avg_pool2d, pad
               out = mat
               is_reversed = getattr(k, 'is_reversed', False)
               cur_window = window_shape[::-1] if is_reversed else window_shape

@@ -14,6 +14,7 @@
 
 import dataclasses
 import enum
+import functools
 import math
 from typing import Any, Callable, Optional, Sequence, Union
 import warnings
@@ -256,7 +257,7 @@ def unmask_fn(fn: ApplyFn) -> ApplyFn:
       x = utils.mask(x.masked_value, x.mask)
     return x
 
-  @utils.wraps(fn)
+  @functools.wraps(fn)
   def fn_no_mask(*args, **kwargs):
     out = fn(*args, **kwargs)
     out = torch.utils._pytree.tree_map_only((torch.Tensor, MaskedArray), unmask, out)
@@ -592,7 +593,6 @@ def _inputs_to_kernel(
   )
 
 
-@torch._dynamo.disable
 def _propagate_shape(
     init_fn: InitFn,
     apply_fn: ApplyFn,
@@ -600,38 +600,11 @@ def _propagate_shape(
     **kwargs
 ) -> PyTree:
   try:
-    # Use 'meta' device for shape evaluation to avoid actual memory
-    # allocation and CPU/CUDA syncs.
-    dev = 'meta'
-    
     def get_shape(s):
         return s.shape if isinstance(s, ShapedArray) else s
         
     input_shape = torch.utils._pytree.tree_map(get_shape, shaped)
-
-    # We mock randn to skip unnecessary generator logic entirely.
-    # This avoids 'cpu device' warnings because we never look at torch.default_generator.
-    old_randn = torch.randn
-    @torch.no_grad()
-    def _mock_randn(*args, **kwargs):
-        kwargs.pop('generator', None)
-        kwargs['device'] = dev
-        # Filter sizes to ensure we handle SymInts/Tensors correctly
-        new_args = []
-        for a in args:
-            if isinstance(a, torch.Tensor):
-                new_args.append(a.shape[0] if a.ndim > 0 else int(a))
-            else:
-                new_args.append(a)
-        return torch.empty(*new_args, **kwargs)
-
-    try:
-        torch.randn = _mock_randn
-        # For analytic cases, rng can be None. If layers fail on None, 
-        # we provide a dummy that is ignored by our mock.
-        out_shape, params = init_fn(None, input_shape)
-    finally:
-        torch.randn = old_randn
+    out_shape, params = init_fn(None, input_shape)
     
     def build_shaped(s, dtype=torch.float32):
         if hasattr(s, 'shape'):
@@ -659,12 +632,12 @@ def _propagate_shape(
 # Global cache for shapes to speed up repeated calls
 _SHAPE_CACHE = {}
 
-@torch._dynamo.disable
 def _set_shapes(
     init_fn: InitFn,
     apply_fn: ApplyFn,
     in_kernel: NTTree[Kernel],
     out_kernel: NTTree[Kernel],
+    layer_cache: Optional[dict] = None,
     **kwargs
 ) -> NTTree[Kernel]:
   """Sets the shapes of `out_kernel` based on the input shapes and functions.
@@ -680,22 +653,20 @@ def _set_shapes(
           return tuple(get_kernel_shapes(v) for v in k)
       return None
 
-  # Cache key based on stable names and structural shapes
-  # Dynamo can change id(fn), so we prefer __module__ + __name__ if available.
-  def fn_to_key(fn):
-      if hasattr(fn, '__qualname__'):
-          return (fn.__module__, fn.__qualname__)
-      return id(fn)
-
   try:
       k_shapes = get_kernel_shapes(in_kernel)
-      # We stringify the shapes if they contain SymInts, or use a tuple for static ints.
-      cache_key = (fn_to_key(init_fn), fn_to_key(apply_fn), k_shapes)
   except Exception:
-      cache_key = None 
+      k_shapes = None 
 
-  if cache_key is not None and cache_key in _SHAPE_CACHE:
-      shape1, shape2 = _SHAPE_CACHE[cache_key]
+  if layer_cache is not None:
+      cache = layer_cache
+      cache_key = k_shapes
+  else:
+      cache = _SHAPE_CACHE
+      cache_key = (id(init_fn), id(apply_fn), k_shapes)
+
+  if cache_key is not None and cache_key in cache:
+      shape1, shape2 = cache[cache_key]
   else:
       def tree_map_kernel(fn, tree):
           if isinstance(tree, Kernel):
@@ -713,7 +684,8 @@ def _set_shapes(
       shape1 = _propagate_shape(init_fn, unmask_fn(apply_fn), s1, **k1)
       shape2 = _propagate_shape(init_fn, unmask_fn(apply_fn), s2, **k2)
       
-      _SHAPE_CACHE[cache_key] = (shape1, shape2)
+      if cache_key is not None:
+          cache[cache_key] = (shape1, shape2)
 
   def _set_shape_map(k_obj, s1_obj, s2_obj):
       if isinstance(k_obj, Kernel):
@@ -768,9 +740,11 @@ def _preprocess_kernel_fn(
   if not _has_req(kernel_fn):
     kernel_fn = requires()(kernel_fn)
 
+  layer_shape_cache = {}
+
   def kernel_fn_kernel(kernel, **kwargs):
     out_kernel = kernel_fn(kernel, **kwargs)
-    return _set_shapes(init_fn, apply_fn, kernel, out_kernel, **kwargs)
+    return _set_shapes(init_fn, apply_fn, kernel, out_kernel, layer_cache=layer_shape_cache, **kwargs)
 
   def kernel_fn_x1(x1, x2, get, **kwargs):
     kernel_fn_reqs = get_req(kernel_fn)
@@ -802,7 +776,7 @@ def _preprocess_kernel_fn(
     kernel = _tree_map2(x1, x2)
 
     out_kernel = kernel_fn(kernel, **kwargs)
-    return _set_shapes(init_fn, apply_fn, kernel, out_kernel, **kwargs)
+    return _set_shapes(init_fn, apply_fn, kernel, out_kernel, layer_cache=layer_shape_cache, **kwargs)
 
   @utils.get_namedtuple('AnalyticKernel')
   def kernel_fn_any(x1_or_kernel: Union[NTTree[torch.Tensor], NTTree[Kernel]],

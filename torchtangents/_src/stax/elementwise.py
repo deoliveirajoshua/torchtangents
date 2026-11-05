@@ -12,7 +12,10 @@
 
 """Elementwise nonlinearities / activation functions ported to PyTorch."""
 
+import functools
 import operator as op
+import operator
+import numpy as np
 from typing import Callable, Optional, Sequence
 import warnings
 
@@ -101,7 +104,6 @@ def Polynomial(coef: Sequence[float]) -> InternalLayer:
   Returns:
     `(init_fn, apply_fn, kernel_fn)`.
   """
-  import numpy as np
   coef = np.array(coef)
   degree = len(coef)
 
@@ -781,11 +783,9 @@ def ExpNormalized(gamma: float = 1, shift: float = -1, do_clip: bool = False) ->
 
 
 def _factorial(n: int) -> int:
-  import functools, operator
   return functools.reduce(operator.mul, range(1, n + 1), 1)
 
 def _double_factorial(n: int) -> int:
-  import functools, operator
   if n <= 0: return 1
   return functools.reduce(operator.mul, range(n, 0, -2), 1)
 
@@ -795,7 +795,6 @@ def Hermite(degree: int) -> InternalLayer:
   if degree < 0:
     raise NotImplementedError('`degree` must be a non-negative integer.')
   
-  import numpy as np
   p = np.polynomial.hermite_e.herme2poly([0] * degree + [1])[::-1]
   coeff = _factorial(degree)**0.5
 
