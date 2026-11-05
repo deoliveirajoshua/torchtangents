@@ -52,6 +52,8 @@ def run_benchmark(device, dtype, use_tf32=False, batch_size=128, input_dim=64, m
         if device.type == 'cuda':
             torch.backends.cuda.matmul.allow_tf32 = use_tf32
             torch.backends.cudnn.allow_tf32 = use_tf32
+            if hasattr(torch, 'set_float32_matmul_precision'):
+                torch.set_float32_matmul_precision('high' if use_tf32 else 'highest')
         
         if model_type == 'mlp':
             layers = []
