@@ -1,5 +1,6 @@
 import os
 import sys
+import gc
 import time
 import csv
 import logging
@@ -28,7 +29,23 @@ logging.getLogger("torch.utils._sympy").setLevel(logging.ERROR)
 
 torch._dynamo.config.cache_size_limit = 64  # Allow more metadata variants
 
+def clear_cuda_cache(device=None):
+    """Thoroughly free Python garbage, flush CUDA memory allocator cache, and reset peak stats."""
+    gc.collect()
+    if torch.cuda.is_available():
+        if device is not None and getattr(device, 'type', None) == 'cuda':
+            torch.cuda.synchronize(device)
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+            torch.cuda.reset_peak_memory_stats(device)
+        else:
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+            torch.cuda.reset_peak_memory_stats()
+
 def run_benchmark(device, dtype, use_tf32=False, batch_size=128, input_dim=64, model_type='mlp', use_compile=False, num_iters=None, warmup_iters=None, pbar=None, format_label=""):
+    clear_cuda_cache(device)
     times = []
     mems = []
     try:
@@ -181,6 +198,8 @@ def run_benchmark(device, dtype, use_tf32=False, batch_size=128, input_dim=64, m
             if remaining > 0:
                 pbar.update(remaining)
         return (f"Error: {e}", 0.0), (0.0, 0.0)
+    finally:
+        clear_cuda_cache(device)
 
 def save_results_to_csv(out_path, results, framework, model, batch_size, input_dim):
     parent_dir = os.path.dirname(out_path)
@@ -338,6 +357,7 @@ def main():
                 label = f"{cfg['format']}{cfg['precision']}"
                 
                 # Uncompiled benchmark
+                clear_cuda_cache(torch.device('cuda'))
                 uncomp_desc = f"{gpu_name} ({label} uncompiled)" if args.compile else f"{gpu_name} ({label})"
                 pbar.set_description(uncomp_desc)
                 res, mem = run_benchmark(
@@ -346,10 +366,12 @@ def main():
                     use_compile=False, num_iters=args.num_iters, warmup_iters=args.warmup_iters,
                     pbar=pbar, format_label=label
                 )
+                clear_cuda_cache(torch.device('cuda'))
                 
                 # Compiled benchmark if requested
                 res_compiled, mem_compiled = None, None
                 if args.compile:
+                    clear_cuda_cache(torch.device('cuda'))
                     pbar.set_description(f"{gpu_name} ({label} compiled)")
                     res_compiled, mem_compiled = run_benchmark(
                         torch.device('cuda'), cfg['dtype'], cfg['tf32'],
@@ -357,6 +379,7 @@ def main():
                         use_compile=True, num_iters=args.num_iters, warmup_iters=args.warmup_iters,
                         pbar=pbar, format_label=f"{label}-comp"
                     )
+                    clear_cuda_cache(torch.device('cuda'))
                 
                 results.append({
                     'Platform': gpu_name,

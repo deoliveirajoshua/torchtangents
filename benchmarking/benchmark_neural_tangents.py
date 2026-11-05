@@ -1,5 +1,6 @@
 import os
 import sys
+import gc
 import time
 import csv
 import logging
@@ -58,6 +59,18 @@ def reset_device_peak_mem(dev):
             dev.reset_peak_memory_stats()
         except Exception:
             pass
+
+
+def clear_device_cache(dev=None):
+    """Clear Python garbage, JAX compilation caches, and reset device peak memory stats."""
+    gc.collect()
+    if hasattr(jax, 'clear_caches'):
+        try:
+            jax.clear_caches()
+        except Exception:
+            pass
+    if dev is not None:
+        reset_device_peak_mem(dev)
 
 
 def save_results_to_csv(out_path, results, framework, model, batch_size, input_dim):
@@ -141,6 +154,7 @@ def save_results_to_csv(out_path, results, framework, model, batch_size, input_d
 def run_benchmark(device, dtype, matmul_precision='default', batch_size=128, input_dim=64,
                   model_type='mlp', use_compile=False, num_iters=None, warmup_iters=None,
                   pbar=None, format_label=""):
+    clear_device_cache(device)
     times = []
     mems = []
     try:
@@ -302,6 +316,8 @@ def run_benchmark(device, dtype, matmul_precision='default', batch_size=128, inp
         if "out of memory" in err_lower or "resourceexhausted" in err_lower:
             return ("OOM", 0.0), (0.0, 0.0)
         return (f"Error: {e}", 0.0), (0.0, 0.0)
+    finally:
+        clear_device_cache(device)
 
 
 def main():
@@ -403,6 +419,7 @@ def main():
                 label = f"{cfg['format']}{cfg['precision']}"
 
                 # Uncompiled benchmark
+                clear_device_cache(gpu_device)
                 uncomp_desc = f"{gpu_name} ({label} uncompiled)" if args.compile else f"{gpu_name} ({label})"
                 pbar.set_description(uncomp_desc)
                 res, mem = run_benchmark(
@@ -411,10 +428,12 @@ def main():
                     use_compile=False, num_iters=args.num_iters, warmup_iters=args.warmup_iters,
                     pbar=pbar, format_label=label
                 )
+                clear_device_cache(gpu_device)
 
                 # Compiled benchmark if requested
                 res_compiled, mem_compiled = None, None
                 if args.compile:
+                    clear_device_cache(gpu_device)
                     pbar.set_description(f"{gpu_name} ({label} jax.jit)")
                     res_compiled, mem_compiled = run_benchmark(
                         gpu_device, cfg['dtype'], cfg['matmul_precision'],
@@ -422,6 +441,7 @@ def main():
                         use_compile=True, num_iters=args.num_iters, warmup_iters=args.warmup_iters,
                         pbar=pbar, format_label=f"{label}-jit"
                     )
+                    clear_device_cache(gpu_device)
 
                 results.append({
                     'Platform': gpu_name,
