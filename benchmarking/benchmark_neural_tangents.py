@@ -158,6 +158,10 @@ def run_benchmark(device, dtype, matmul_precision='default', batch_size=128, inp
     times = []
     mems = []
     try:
+        # Enable x64 mode when benchmarking float64, otherwise disable to prevent truncation to float32
+        is_f64 = (dtype == jnp.float64)
+        jax.config.update("jax_enable_x64", is_f64)
+
         if matmul_precision != 'default':
             jax.config.update("jax_default_matmul_precision", matmul_precision)
         else:
@@ -317,6 +321,8 @@ def run_benchmark(device, dtype, matmul_precision='default', batch_size=128, inp
             return ("OOM", 0.0), (0.0, 0.0)
         return (f"Error: {e}", 0.0), (0.0, 0.0)
     finally:
+        jax.config.update("jax_enable_x64", False)
+        jax.config.update("jax_default_matmul_precision", None)
         clear_device_cache(device)
 
 
@@ -352,6 +358,10 @@ def main():
     if gpu_device is None:
         print("JAX GPU device is not available (running with CPU backend).")
 
+    # Note: Neural Tangents internally upcasts float16/bfloat16 inputs to float32
+    # via `x.astype(jax.dtypes.canonicalize_dtype(jnp.float64))` in `_inputs_to_kernel`.
+    # Therefore, FP16 and BF16 in Neural Tangents execute computation in float32 precision.
+    # float64 requires dynamic toggling of jax_enable_x64 (otherwise JAX silently truncates to float32).
     configs = [
         {'format': 'FP', 'precision': 16, 'dtype': jnp.float16, 'matmul_precision': 'default'},
         {'format': 'FP', 'precision': 32, 'dtype': jnp.float32, 'matmul_precision': 'default'},
