@@ -149,7 +149,7 @@ def Flatten(
       return x
 
     cov1 = trace(cov1, 1 if k.diagonal_batch else 2)
-    cov2 = trace(cov2, 1 if k.diagonal_batch else 2)
+    cov2 = None if cov2 is None else (cov1 if (cov2 is cov1 or k.x1_is_x2) else trace(cov2, 1 if k.diagonal_batch else 2))
     nngp = trace(nngp, 2)
     ntk = trace(ntk, 2)
 
@@ -373,7 +373,7 @@ def Dropout(rate: float, mode: str = 'train') -> InternalLayer:
     factor = 1. / rate
 
     cov1 = _diag_mul(cov1, factor, k.diagonal_batch, k.diagonal_spatial)
-    cov2 = _diag_mul(cov2, factor, k.diagonal_batch, k.diagonal_spatial)
+    cov2 = None if cov2 is None else (cov1 if (cov2 is cov1 or k.x1_is_x2) else _diag_mul(cov2, factor, k.diagonal_batch, k.diagonal_spatial))
 
     new_factor = factor if k.x1_is_x2 else 1.0
     
@@ -640,7 +640,7 @@ def _Conv(
         if cov1 is not None:
             cov1 = get_diagonal(cov1, k.diagonal_batch, False)
         if cov2 is not None:
-            cov2 = get_diagonal(cov2, k.diagonal_batch, False)
+            cov2 = cov1 if (cov2 is cov1 or k.x1_is_x2) else get_diagonal(cov2, k.diagonal_batch, False)
         k = k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk,
                       diagonal_spatial=True)
 
@@ -1093,7 +1093,7 @@ def GlobalSelfAttention(
     kern_weight, pos_emb_weight = _get_interpolation_coefficients()
 
     cov1_interp = weighted_sum(k.cov1, R1, kern_weight, pos_emb_weight)
-    cov2_interp = weighted_sum(k.cov2, R2, kern_weight, pos_emb_weight)
+    cov2_interp = None if k.cov2 is None else (cov1_interp if (k.cov2 is k.cov1 or k.x1_is_x2) else weighted_sum(k.cov2, R2, kern_weight, pos_emb_weight))
 
     if val_pos_emb or (not linear_scaling and
                        attention_mechanism == AttentionMechanism.IDENTITY):
@@ -1167,10 +1167,10 @@ def GlobalSelfAttention(
         return _affine(mat, OV_std, b_std)
 
       G1 = _get_weighting(cov1_interp, k.mask1)
-      G2 = _get_weighting(cov2_interp, k.mask2)
+      G2 = None if k.cov2 is None else (G1 if (k.cov2 is k.cov1 or k.x1_is_x2) else _get_weighting(cov2_interp, k.mask2))
 
       cov1 = _weigh_kernel(cov1_interp if val_pos_emb else k.cov1, G1)
-      cov2 = _weigh_kernel(cov2_interp if val_pos_emb else k.cov2, G2)
+      cov2 = None if k.cov2 is None else (cov1 if (k.cov2 is k.cov1 or k.x1_is_x2) else _weigh_kernel(cov2_interp if val_pos_emb else k.cov2, G2))
       nngp = _weigh_kernel(nngp_interp if val_pos_emb else k.nngp, G1, G2)
       
       if k.ntk is None:
@@ -1199,13 +1199,13 @@ def GlobalSelfAttention(
 
       dot11 = dot(cov1_interp, None if val_pos_emb else k.cov1)
       dot12 = dot(nngp_interp, None if val_pos_emb else k.nngp, False)
-      dot22 = dot(cov2_interp, None if val_pos_emb else k.cov2)
+      dot22 = None if k.cov2 is None else (dot11 if (k.cov2 is k.cov1 or k.x1_is_x2) else dot(cov2_interp, None if val_pos_emb else k.cov2))
 
       std = QK_std * OV_std
 
       nngp = _affine(dot12 * nngp_interp, std, b_std)
       cov1 = _affine(dot11 * cov1_interp, std, b_std)
-      cov2 = _affine(None if dot22 is None else dot22 * cov2_interp, std, b_std)
+      cov2 = None if k.cov2 is None else (cov1 if (k.cov2 is k.cov1 or k.x1_is_x2) else _affine(None if dot22 is None else dot22 * cov2_interp, std, b_std))
 
       if ntk_interp is not None:
         if val_pos_emb or pos_emb_type == PositionalEmbedding.NONE:
@@ -1356,9 +1356,11 @@ def ImageResize(
     shape1 = _shape(k.shape1)
     shape2 = _shape(k.shape2)
 
-    k_out = k.replace(cov1=resize(cov1, shape1, shape1, k.diagonal_batch),
+    cov1_out = resize(cov1, shape1, shape1, k.diagonal_batch)
+    cov2_out = None if cov2 is None else (cov1_out if (cov2 is cov1 or k.x1_is_x2) else resize(cov2, shape2, shape2, k.diagonal_batch))
+    k_out = k.replace(cov1=cov1_out,
                   nngp=resize(nngp, shape1, shape2, False),
-                  cov2=resize(cov2, shape2, shape2, k.diagonal_batch),
+                  cov2=cov2_out,
                   ntk=resize(ntk, shape1, shape2, False))
     return k_out
 
@@ -1580,9 +1582,11 @@ def Aggregate(
         mat = torch.permute(mat, tuple(np.argsort(permutation).tolist()))
         return utils.zip_axes(mat, start_axis)
 
+      cov1_out = transpose(k.cov1, k.diagonal_batch)
+      cov2_out = None if k.cov2 is None else (cov1_out if (k.cov2 is k.cov1 or k.x1_is_x2) else transpose(k.cov2, k.diagonal_batch))
       k = k.replace(
-          cov1=transpose(k.cov1, k.diagonal_batch),
-          cov2=transpose(k.cov2, k.diagonal_batch),
+          cov1=cov1_out,
+          cov2=cov2_out,
           nngp=transpose(k.nngp, False),
           ntk=transpose(k.ntk, False),
           batch_axis=batch_axis_in % ndim,
@@ -1739,7 +1743,7 @@ def LayerNorm(
 
     cov1 = cov1 / torch.sqrt(prod11)
     if cov2 is not None:
-      cov2 = cov2 / torch.sqrt(prod22)
+      cov2 = cov1 if (cov2 is cov1 or k.x1_is_x2) else cov2 / torch.sqrt(prod22)
 
     return k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk)
 

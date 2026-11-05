@@ -565,7 +565,10 @@ def _inputs_to_kernel(
   else:
     x2, cov2, mask2 = get_x_cov_mask(x2)
     x1_is_x2 = False
-  nngp = _cov(x1, x2, diagonal_spatial, batch_axis, channel_axis)
+  if x1_is_x2 and not diagonal_batch:
+    nngp = cov1
+  else:
+    nngp = _cov(x1, x2, diagonal_spatial, batch_axis, channel_axis)
 
   ntk = torch.zeros_like(nngp) if compute_ntk else None
   is_gaussian = False
@@ -852,12 +855,10 @@ def get_diagonal_outer_prods(
   if cov1 is None:
     raise ValueError('cov1 is None')
   end_axis = 1 if diagonal_spatial else cov1.ndim
-  prod12 = utils.outer_prod(cov1, cov2, 0, end_axis, operation)
-
   start_axis = 1 if diagonal_batch else 0
   prod11 = utils.outer_prod(cov1, cov1, start_axis, end_axis, operation)
-  prod22 = (utils.outer_prod(cov2, cov2, start_axis, end_axis, operation)
-            if (cov2 is not None and cov2 is not cov1) else prod11)
+  prod12 = prod11 if (cov2 is cov1 and not diagonal_batch) else utils.outer_prod(cov1, cov2, 0, end_axis, operation)
+  prod22 = prod11 if (cov2 is None or cov2 is cov1) else utils.outer_prod(cov2, cov2, start_axis, end_axis, operation)
 
   return prod11, prod12, prod22
 

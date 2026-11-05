@@ -78,11 +78,14 @@ class Kernel:
         self._raw = nngp
         self.ntk = ntk
         self.cov1 = cov1 if cov1 is not None else self._raw
-        self.cov2 = cov2
         
         # Structural metadata must be Python objects to avoid graph breaks 
         # during structural branching
         self.x1_is_x2 = bool(x1_is_x2.item() if isinstance(x1_is_x2, torch.Tensor) else (True if x1_is_x2 is None else x1_is_x2))
+        if self.x1_is_x2:
+            self.cov2 = self.cov1 if cov2 is not None else None
+        else:
+            self.cov2 = cov2
         self.is_gaussian = bool(is_gaussian.item() if isinstance(is_gaussian, torch.Tensor) else is_gaussian)
         self.is_input = bool(is_input.item() if isinstance(is_input, torch.Tensor) else is_input)
         self.diagonal_batch = bool(diagonal_batch)
@@ -240,12 +243,19 @@ class Kernel:
         Returns a new Kernel with updated attributes.
         Uses explicit arguments to avoid dynamic kwargs specialization in torch.compile.
         """
+        new_x1_is_x2 = x1_is_x2 if x1_is_x2 is not None else self.x1_is_x2
+        new_cov1 = cov1 if cov1 is not None else self.cov1
+        if new_x1_is_x2:
+            new_cov2 = new_cov1 if (cov2 is not None or self.cov2 is not None) else None
+        else:
+            new_cov2 = cov2 if cov2 is not None else self.cov2
+
         return Kernel(
             nngp=nngp if nngp is not None else self.nngp,
             ntk=ntk if ntk is not None else self.ntk,
-            cov1=cov1 if cov1 is not None else self.cov1,
-            cov2=cov2 if cov2 is not None else self.cov2,
-            x1_is_x2=x1_is_x2 if x1_is_x2 is not None else self.x1_is_x2,
+            cov1=new_cov1,
+            cov2=new_cov2,
+            x1_is_x2=new_x1_is_x2,
             is_gaussian=is_gaussian if is_gaussian is not None else self.is_gaussian,
             is_reversed=is_reversed if is_reversed is not None else self.is_reversed,
             is_input=is_input if is_input is not None else self.is_input,

@@ -178,11 +178,11 @@ def Polynomial(coef: Sequence[float]) -> InternalLayer:
     if k.diagonal_batch and k.diagonal_spatial:
       cov1 = nngp_fn_diag(cov1, rs11)
       if cov2 is not None:
-        cov2 = nngp_fn_diag(cov2, rs22)
+        cov2 = cov1 if (cov2 is cov1 or k.x1_is_x2) else nngp_fn_diag(cov2, rs22)
     else:
       cov1, _ = nngp_ntk_fn(cov1, prod11, rs11)
       if cov2 is not None:
-        cov2, _ = nngp_ntk_fn(cov2, prod22, rs22)
+        cov2, _ = (cov1, None) if (cov2 is cov1 or k.x1_is_x2) else nngp_ntk_fn(cov2, prod22, rs22)
 
     k = k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk)
     return k
@@ -414,23 +414,14 @@ def Erf(
 
     if k.diagonal_batch and k.diagonal_spatial:
       cov1_out = nngp_fn_diag(cov1_b)
-      if cov2_b is not None:
-        cov2_out = nngp_fn_diag(cov2_b)
-      else:
-        cov2_out = None
+      cov2_out = None if cov2_b is None else (cov1_out if (cov2_b is cov1_b or k.x1_is_x2) else nngp_fn_diag(cov2_b))
     else:
       cov1_out, _ = nngp_ntk_fn(cov1_b, prod11)
-      if cov2_b is not None:
-        cov2_out, _ = nngp_ntk_fn(cov2_b, prod22)
-      else:
-        cov2_out = None
+      cov2_out = None if cov2_b is None else (cov1_out if (cov2_b is cov1_b or k.x1_is_x2) else nngp_ntk_fn(cov2_b, prod22)[0])
 
     # scale by a and shift by c
     cov1_final = cov1_out * (a ** 2)
-    if cov2_out is not None:
-        cov2_final = cov2_out * (a ** 2)
-    else:
-        cov2_final = None
+    cov2_final = None if cov2_out is None else (cov1_final if (cov2_out is cov1_out or k.x1_is_x2) else cov2_out * (a ** 2))
     nngp_final = nngp_out * (a ** 2)
     if ntk_out is not None:
         ntk_final = ntk_out * (a ** 2)
@@ -494,7 +485,7 @@ def Gabor() -> InternalLayer:
     else:
       cov1, _ = nngp_ntk_fn(cov1, prod11, sum11)
       if cov2 is not None:
-        cov2, _ = nngp_ntk_fn(cov2, prod22, sum22)
+        cov2, _ = (cov1, None) if (cov2 is cov1 or k.x1_is_x2) else nngp_ntk_fn(cov2, prod22, sum22)
 
     return k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk)
 
@@ -553,7 +544,7 @@ def GeLU(approximate: bool = False) -> InternalLayer:
     else:
       cov1, _ = nngp_ntk_fn(cov1, prod11, prod11_plus_1)
       if cov2 is not None:
-        cov2, _ = nngp_ntk_fn(cov2, prod22, prod22_plus_1)
+        cov2, _ = (cov1, None) if (cov2 is cov1 or k.x1_is_x2) else nngp_ntk_fn(cov2, prod22, prod22_plus_1)
 
     return k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk)
 
@@ -592,7 +583,7 @@ def Sin(a: float = 1., b: float = 1., c: float = 0.) -> InternalLayer:
     else:
       cov1, _ = nngp_ntk_fn(cov1, sum11)
       if cov2 is not None:
-        cov2, _ = nngp_ntk_fn(cov2, sum22)
+        cov2, _ = (cov1, None) if (cov2 is cov1 or k.x1_is_x2) else nngp_ntk_fn(cov2, sum22)
 
     return k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk)
 
@@ -634,7 +625,7 @@ def Rbf(gamma: float = 1.0) -> InternalLayer:
     else:
       cov1, _ = nngp_ntk_fn(cov1, sum11, None)
       if cov2 is not None:
-        cov2, _ = nngp_ntk_fn(cov2, sum22, None)
+        cov2, _ = (cov1, None) if (cov2 is cov1 or k.x1_is_x2) else nngp_ntk_fn(cov2, sum22, None)
 
     return k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk)
 
@@ -693,11 +684,11 @@ def Exp(a: float = 1, b: float = 1) -> InternalLayer:
     else:
       cov1, _ = nngp_ntk_fn(cov1, sum11, None)
       if cov2 is not None:
-        cov2, _ = nngp_ntk_fn(cov2, sum22, None)
+        cov2, _ = (cov1, None) if (cov2 is cov1 or k.x1_is_x2) else nngp_ntk_fn(cov2, sum22, None)
 
     # the ntk/cov will be proportional to a^2 since f(x) * f(y) has a^2
     if cov1 is not None: cov1 = cov1 * (a ** 2)
-    if cov2 is not None: cov2 = cov2 * (a ** 2)
+    if cov2 is not None: cov2 = cov1 if (cov2 is cov1 or k.x1_is_x2) else cov2 * (a ** 2)
     if nngp is not None: nngp = nngp * (a ** 2)
     if ntk is not None: ntk = ntk * (a ** 2)
     return k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk)
@@ -745,7 +736,7 @@ def Gaussian(a: float = 1, b: float = -1) -> InternalLayer:
         cov2, _ = (cov1, None) if (cov2 is cov1 or k.x1_is_x2) else nngp_ntk_fn(cov2, prod22)
 
     if cov1 is not None: cov1 = cov1 * (a ** 2)
-    if cov2 is not None: cov2 = cov2 * (a ** 2)
+    if cov2 is not None: cov2 = cov1 if (cov2 is cov1 or k.x1_is_x2) else cov2 * (a ** 2)
     if nngp is not None: nngp = nngp * (a ** 2)
     if ntk is not None: ntk = ntk * (a ** 2)
     return k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk)
@@ -773,10 +764,13 @@ def ExpNormalized(gamma: float = 1, shift: float = -1, do_clip: bool = False) ->
 
     exp12 = exp_norm(nngp, prod12)
 
+    cov1_out = prod11 * exp_norm(cov1, prod11)
+    cov2_out = None if cov2 is None else (cov1_out if (cov2 is cov1 or k.x1_is_x2) else prod22 * exp_norm(cov2, prod22))
+
     return k.replace(
         nngp=prod12 * exp12,
-        cov1=prod11 * exp_norm(cov1, prod11),
-        cov2=None if cov2 is None else prod22 * exp_norm(cov2, prod22),
+        cov1=cov1_out,
+        cov2=cov2_out,
         ntk=ntk if ntk is None else gamma * ntk * exp12)
 
   return _elementwise(None, 'ExpNormalized', kernel_fn)
@@ -817,7 +811,9 @@ def Hermite(degree: int) -> InternalLayer:
     def _power(mat):
       return mat**degree if mat is not None else None
 
-    nngp, cov1, cov2 = map(_power, (nngp, cov1, cov2))
+    nngp = _power(nngp)
+    cov1 = _power(cov1)
+    cov2 = None if cov2 is None else (cov1 if (cov2 is cov1 or k.x1_is_x2) else _power(cov2))
     k = k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk)
     return k
 

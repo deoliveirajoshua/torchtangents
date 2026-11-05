@@ -71,7 +71,7 @@ def _GlobalPool(
     mask11, mask12, mask22 = k._get_mask_prods(k.mask1, k.mask2)
 
     cov1 = _pool(cov1, 1 if k.diagonal_batch else 2, mask11)
-    cov2 = _pool(cov2, 1 if k.diagonal_batch else 2, mask22)
+    cov2 = None if cov2 is None else (cov1 if (cov2 is cov1 or k.x1_is_x2) else _pool(cov2, 1 if k.diagonal_batch else 2, mask22))
     nngp = _pool(nngp, 2, mask12)
     ntk = _pool(ntk, 2, mask12)
 
@@ -297,7 +297,7 @@ def _Pool(
       nngp = pool(nngp, 2)
       ntk = pool(ntk, 2)
       cov1 = pool(cov1, 1 if k.diagonal_batch else 2)
-      cov2 = pool(cov2, 1 if k.diagonal_batch else 2)
+      cov2 = None if cov2 is None else (cov1 if (cov2 is cov1 or k.x1_is_x2) else pool(cov2, 1 if k.diagonal_batch else 2))
       return k.replace(cov1=cov1, nngp=nngp, cov2=cov2, ntk=ntk)
 
   def mask_fn(mask, input_shape):

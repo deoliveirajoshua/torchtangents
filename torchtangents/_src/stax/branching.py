@@ -89,7 +89,10 @@ def FanInSum() -> InternalLayerMasked:
     cov2s = [k.cov2 for k in ks]
     nngps = [k.nngp for k in ks]
     ntks = [k.ntk for k in ks]
-    cov1, cov2, nngp, ntk = map(_mats_sum, (cov1s, cov2s, nngps, ntks))
+    cov1 = _mats_sum(cov1s)
+    cov2 = None if None in cov2s else (cov1 if (ks[0].x1_is_x2 or all(c2 is c1 for c1, c2 in zip(cov1s, cov2s))) else _mats_sum(cov2s))
+    nngp = _mats_sum(nngps)
+    ntk = _mats_sum(ntks)
 
     return Kernel(
         cov1=cov1,
@@ -166,6 +169,8 @@ def FanInProd() -> InternalLayerMasked:
 
     if None in cov2s:
       cov2 = None
+    elif ks[0].x1_is_x2 or all(c2 is c1 for c1, c2 in zip(cov1s, cov2s)):
+      cov2 = cov1
     else:
       cov2 = cov2s[0]
       for c in cov2s[1:]:
@@ -287,8 +292,8 @@ def FanInConcat(axis: int = -1) -> InternalLayerMasked:
 
     cov1 = _concat_kernels([k.cov1 for k in ks], _k_axis,
                            diagonal_batch, diagonal_spatial, widths)
-    cov2 = _concat_kernels([k.cov2 for k in ks], _k_axis,
-                           diagonal_batch, diagonal_spatial, widths)
+    cov2_list = [k.cov2 for k in ks]
+    cov2 = None if None in cov2_list else (cov1 if (ks[0].x1_is_x2 or all(k.cov2 is k.cov1 for k in ks)) else _concat_kernels(cov2_list, _k_axis, diagonal_batch, diagonal_spatial, widths))
     nngp = _concat_kernels([k.nngp for k in ks], _k_axis,
                            False, diagonal_spatial, widths)
     ntk = _concat_kernels([k.ntk for k in ks], _k_axis,
