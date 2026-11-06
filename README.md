@@ -22,7 +22,7 @@
 pip install torchtangents
 ```
 
-### Editable / Developer Installation
+### From GitHub Source
 ```bash
 git clone https://github.com/deoliveirajoshua/torchtangents.git
 cd torchtangents
